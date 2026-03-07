@@ -1507,6 +1507,7 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
         input_scale = _make_per_tensor_scale_parameter(
             (len(output_partition_sizes),),
             weight_loader=weight_loader,
+            fill_value=torch.finfo(torch.float32).min,
             needs_scalar_to_array=True,
         )
         layer.register_parameter("input_scale", input_scale)
@@ -1526,6 +1527,7 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
         weight_scale_2 = _make_per_tensor_scale_parameter(
             (len(output_partition_sizes),),
             weight_loader=weight_loader,
+            fill_value=torch.finfo(torch.float32).min,
             needs_scalar_to_array=True,
         )
         layer.register_parameter("weight_scale_2", weight_scale_2)
@@ -2145,13 +2147,21 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             else (layer.num_local_experts,)
         )
         w13_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(w13_weight_scale_shape, dtype=torch.float32),
+            data=torch.full(
+                w13_weight_scale_shape,
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
 
         w2_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(layer.num_local_experts, dtype=torch.float32),
+            data=torch.full(
+                (layer.num_local_experts,),
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
@@ -2179,14 +2189,22 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
 
         w13_input_scale_shape = (layer.num_experts, num_shards)
         w13_input_scale = PerTensorScaleParameter(
-            data=torch.empty(w13_input_scale_shape, dtype=torch.float32),
+            data=torch.full(
+                w13_input_scale_shape,
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         w13_input_scale._sglang_require_global_experts = True
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
-            data=torch.empty(layer.num_experts, dtype=torch.float32),
+            data=torch.full(
+                (layer.num_experts,),
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         w2_input_scale._sglang_require_global_experts = True
