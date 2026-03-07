@@ -301,6 +301,22 @@ class PiecewiseCudaGraphRunner:
         except Exception as e:
             logger.warning(f"Pre-warm of FP4 kernel fns failed (non-fatal): {e}")
 
+        # Pre-warm KVFP4 quantize/dequantize (@torch.compile) so the first
+        # call during CUDA graph capture doesn't trigger compilation.
+        if self.model_runner.server_args.kv_cache_dtype == "fp4_e2m1":
+            try:
+                from sglang.srt.layers.quantization.kvfp4_tensor import (
+                    KVFP4QuantizeUtil,
+                )
+
+                dummy = torch.randn(1, 1, 16, device="cuda", dtype=torch.bfloat16)
+                q, s = KVFP4QuantizeUtil.batched_quantize(dummy)
+                KVFP4QuantizeUtil.batched_dequantize(q, s)
+                logger.info("Pre-warmed KVFP4 quantize/dequantize kernels")
+            except Exception as e:
+                logger.warning(
+                    f"Pre-warm of KVFP4 kernels failed (non-fatal): {e}"
+                )
         with enable_piecewise_cuda_graph():
             language_model = getattr(
                 self.model_runner.model, "language_model", self.model_runner.model
