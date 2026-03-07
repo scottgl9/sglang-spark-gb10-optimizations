@@ -95,6 +95,7 @@ from sglang.srt.utils import (
     make_layers,
     set_weight_attrs,
 )
+from sglang.srt.utils.common import is_sm120_supported
 from sglang.srt.utils.hf_transformers_utils import get_processor, get_rope_config
 
 logger = logging.getLogger(__name__)
@@ -1380,14 +1381,18 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
     def get_embed_and_head(self):
         embed = self.model.embed_tokens.weight if self.pp_group.is_first_rank else None
-        head = self.lm_head.weight if self.pp_group.is_last_rank else None
+        head = (
+            getattr(self.lm_head, "weight", None)
+            if self.pp_group.is_last_rank
+            else None
+        )
         return embed, head
 
     def set_embed_and_head(self, embed, head):
         if self.pp_group.is_first_rank and embed is not None:
             del self.model.embed_tokens.weight
             self.model.embed_tokens.weight = embed
-        if self.pp_group.is_last_rank and head is not None:
+        if self.pp_group.is_last_rank and head is not None and hasattr(self.lm_head, "weight"):
             del self.lm_head.weight
             self.lm_head.weight = head
         torch.cuda.empty_cache()
@@ -1476,6 +1481,15 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        # Post-quantize large BF16 GDN layers to NVFP4 on SM120
+        if is_sm120_supported():
+            from sglang.srt.layers.quantization.nvfp4_post_quant import (
+                apply_nvfp4_post_quant,
+            )
+
+            apply_nvfp4_post_quant(self, layer_patterns=["in_proj_qkv", "in_proj_z"])
+
         return loaded_params
 
 
@@ -1517,14 +1531,18 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
     def get_embed_and_head(self):
         embed = self.model.embed_tokens.weight if self.pp_group.is_first_rank else None
-        head = self.lm_head.weight if self.pp_group.is_last_rank else None
+        head = (
+            getattr(self.lm_head, "weight", None)
+            if self.pp_group.is_last_rank
+            else None
+        )
         return embed, head
 
     def set_embed_and_head(self, embed, head):
         if self.pp_group.is_first_rank and embed is not None:
             del self.model.embed_tokens.weight
             self.model.embed_tokens.weight = embed
-        if self.pp_group.is_last_rank and head is not None:
+        if self.pp_group.is_last_rank and head is not None and hasattr(self.lm_head, "weight"):
             del self.lm_head.weight
             self.lm_head.weight = head
         torch.cuda.empty_cache()
@@ -1840,6 +1858,14 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 if isinstance(layer.mlp, Qwen2MoeSparseMoeBlock)
             }
         )
+
+        # Post-quantize large BF16 GDN layers to NVFP4 on SM120
+        if is_sm120_supported():
+            from sglang.srt.layers.quantization.nvfp4_post_quant import (
+                apply_nvfp4_post_quant,
+            )
+
+            apply_nvfp4_post_quant(self, layer_patterns=["in_proj_qkv", "in_proj_z"])
 
         return loaded_params
 
