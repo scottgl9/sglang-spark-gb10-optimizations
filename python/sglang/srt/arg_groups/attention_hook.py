@@ -236,10 +236,13 @@ def handle_linear_attn_backend(server_args: Any):
     # when the user hasn't explicitly chosen a decode backend and
     # mamba-ssm-dtype is bf16 (required by FlashInfer GDN on SM100+).
     # Fixed in FlashInfer v0.6.7: flashinfer-ai/flashinfer#2810
+    # SM120 (Blackwell consumer, e.g. GB10) shares the same FlashInfer GDN
+    # CUTLASS kernel requirements as SM100+; its Triton fallback lacks
+    # pipelining for the recurrent SSM state update, so flashinfer is faster.
     if (
         cfg.linear_attn_decode_backend is None
         and cfg.linear_attn_backend != "helion"
-        and get_platform().is_sm100
+        and (get_platform().is_sm100 or get_platform().is_sm120)
         and cfg.mamba_ssm_dtype == "bfloat16"
         # Stage 4: flashinfer's recurrent_kda compiles the state slot stride
         # as a free int64, so it reads the page-major/unified envelope-strided
@@ -252,7 +255,7 @@ def handle_linear_attn_backend(server_args: Any):
             linear_attn_decode_backend="flashinfer",
         )
         logger.info(
-            "SM100+ detected with mamba-ssm-dtype=bfloat16, "
+            "SM100+/SM120 detected with mamba-ssm-dtype=bfloat16, "
             "defaulting --linear-attn-decode-backend to flashinfer."
         )
 
