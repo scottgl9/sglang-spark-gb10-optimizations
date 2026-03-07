@@ -101,6 +101,25 @@ def handle_speculative_decoding(server_args: "ServerArgs") -> None:
             )
 
     if server_args.speculative_algorithm is not None:
+        from sglang.srt.utils.common import (
+            is_flashinfer_available,
+            is_sm100_supported,
+            is_sm120_supported,
+        )
+
+        # SM120+: auto-enable decode attention mode for MTP speculative decoding.
+        # FlashInfer 0.6.4+ decode path works correctly with bf16 Q + fp8 KV + head_dim=256.
+        if (
+            server_args.speculative_attention_mode == "prefill"
+            and (is_sm100_supported() or is_sm120_supported())
+            and is_flashinfer_available()
+        ):
+            server_args.speculative_attention_mode = "decode"
+            logger.info(
+                "Auto-enabled speculative_attention_mode='decode' for SM100+/SM120+ "
+                "with FlashInfer (faster than prefill mode for draft verification)."
+            )
+
         from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
         from sglang.srt.speculative.spec_registry import CustomSpecAlgo
 
