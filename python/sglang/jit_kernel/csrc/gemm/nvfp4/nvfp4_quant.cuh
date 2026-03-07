@@ -26,10 +26,51 @@ limitations under the License.
 constexpr int CVT_FP4_ELTS_PER_THREAD = 8;
 constexpr int CVT_FP4_SF_VEC_SIZE = 16;
 
+// Software E2M1 conversion for SM121 (GB10) - no cvt.rn.satfinite.e2m1x2.f32
+// E2M1 format: 1 sign + 2 exponent + 1 mantissa
+// Representable values: 0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0 (and negatives)
+// Uses round-to-nearest-even at midpoints, satfinite clamping to 6.0.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1210
+SGL_DEVICE uint8_t _sw_float_to_e2m1(float x) {
+  uint8_t sign = (uint8_t)((__float_as_uint(x) >> 28) & 8u);
+  float ax = fabsf(x);
+  uint8_t mag;
+  if      (ax <= 0.25f)  mag = 0;  // 0.0
+  else if (ax <  0.75f)  mag = 1;  // 0.5
+  else if (ax <= 1.25f)  mag = 2;  // 1.0
+  else if (ax <  1.75f)  mag = 3;  // 1.5
+  else if (ax <= 2.5f)   mag = 4;  // 2.0
+  else if (ax <  3.5f)   mag = 5;  // 3.0
+  else if (ax <= 5.0f)   mag = 6;  // 4.0
+  else                    mag = 7;  // 6.0 - satfinite
+  return sign | mag;
+}
+
+SGL_DEVICE uint32_t _sw_fp32_vec8_to_e2m1_flat(
+    float f0, float f1, float f2, float f3,
+    float f4, float f5, float f6, float f7) {
+  uint32_t val = 0;
+  val |= (uint32_t)_sw_float_to_e2m1(f0);
+  val |= (uint32_t)_sw_float_to_e2m1(f1) << 4;
+  val |= (uint32_t)_sw_float_to_e2m1(f2) << 8;
+  val |= (uint32_t)_sw_float_to_e2m1(f3) << 12;
+  val |= (uint32_t)_sw_float_to_e2m1(f4) << 16;
+  val |= (uint32_t)_sw_float_to_e2m1(f5) << 20;
+  val |= (uint32_t)_sw_float_to_e2m1(f6) << 24;
+  val |= (uint32_t)_sw_float_to_e2m1(f7) << 28;
+  return val;
+}
+#endif  // __CUDA_ARCH__ == 1210
+
 // Convert 8 float32 values into 8 e2m1 values (represented as one uint32_t).
 SGL_DEVICE uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
   // PTX instructions used here requires >= sm100f.
-#if CUTLASS_ARCH_MMA_SM100A_ENABLED || CUTLASS_ARCH_MMA_SM103A_ENABLED || CUTLASS_ARCH_MMA_SM120A_ENABLED || \
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1210
+  // Software E2M1 for SM121 (no cvt.rn.satfinite.e2m1x2.f32)
+  return _sw_fp32_vec8_to_e2m1_flat(
+      array[0], array[1], array[2], array[3],
+      array[4], array[5], array[6], array[7]);
+#elif CUTLASS_ARCH_MMA_SM100A_ENABLED || CUTLASS_ARCH_MMA_SM103A_ENABLED || CUTLASS_ARCH_MMA_SM120A_ENABLED || \
     (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && (__CUDA_ARCH_FAMILY_SPECIFIC__ >= 1000))
   uint32_t val;
   asm volatile(
@@ -64,7 +105,11 @@ SGL_DEVICE uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
 // Convert 4 float2 values into 8 e2m1 values (represented as one uint32_t).
 SGL_DEVICE uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
   // PTX instructions used here requires >= sm100f.
-#if CUTLASS_ARCH_MMA_SM100A_ENABLED || CUTLASS_ARCH_MMA_SM103A_ENABLED || CUTLASS_ARCH_MMA_SM120A_ENABLED || \
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1210
+  return _sw_fp32_vec8_to_e2m1_flat(
+      array[0].x, array[0].y, array[1].x, array[1].y,
+      array[2].x, array[2].y, array[3].x, array[3].y);
+#elif CUTLASS_ARCH_MMA_SM100A_ENABLED || CUTLASS_ARCH_MMA_SM103A_ENABLED || CUTLASS_ARCH_MMA_SM120A_ENABLED || \
     (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && (__CUDA_ARCH_FAMILY_SPECIFIC__ >= 1000))
   uint32_t val;
   asm volatile(
