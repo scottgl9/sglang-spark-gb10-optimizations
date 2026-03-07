@@ -660,6 +660,25 @@ def _handle_eagle_family(server_args: ServerArgs) -> None:
             "Max running requests is reset to 48 for speculative decoding. You can override this by explicitly setting --max-running-requests."
         )
 
+    # SM100+/SM120: auto-enable decode attention mode for speculative decoding.
+    # FlashInfer's decode path handles bf16 Q + fp8 KV + head_dim=256 (DeepSeek
+    # MTP's MLA shape) correctly and is faster than prefill mode for draft
+    # verification on Blackwell.
+    if (
+        cfg.speculative_attention_mode == "prefill"
+        and (get_platform().is_sm100 or get_platform().is_sm120)
+        and get_platform().has_flashinfer
+    ):
+        declare_resolution(
+            server_args,
+            "_handle_eagle_family",
+            speculative_attention_mode="decode",
+        )
+        logger.info(
+            "Auto-enabled speculative_attention_mode='decode' for SM100+/SM120 "
+            "with FlashInfer (faster than prefill mode for draft verification)."
+        )
+
     _disable_overlap_schedule_for_cpu(server_args)
 
     if resolved_view(server_args).disable_overlap_schedule:

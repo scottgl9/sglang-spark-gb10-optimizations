@@ -242,7 +242,7 @@ def maybe_quantize_mtp_fp8(draft_model: torch.nn.Module) -> None:
     """Apply FP8 post-quantization to MTP draft model if SGLANG_MTP_FP8=1.
 
     Quantizes:
-    - fc layer (nn.Linear, BF16 -> FP8): halves fc bandwidth
+    - fc and lm_head layers (nn.Linear, BF16 -> FP8): halves bandwidth
     - MoE expert weights (BF16 -> FP8): halves expert bandwidth per draft step
     """
     if os.environ.get("SGLANG_MTP_FP8", "0") != "1":
@@ -250,8 +250,8 @@ def maybe_quantize_mtp_fp8(draft_model: torch.nn.Module) -> None:
 
     logger.info("SGLANG_MTP_FP8=1: applying FP8 post-quantization to MTP draft model")
 
-    # Quantize fc layers (nn.Linear)
-    n_fc = apply_fp8_post_quant(draft_model, layer_patterns=["fc"])
+    # Quantize fc and lm_head layers (nn.Linear)
+    n_fc = apply_fp8_post_quant(draft_model, layer_patterns=["fc", "lm_head"])
 
     # Quantize MoE expert weights
     n_moe = quantize_mtp_moe_fp8(draft_model)
