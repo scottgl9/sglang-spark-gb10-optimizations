@@ -1,5 +1,6 @@
 import enum
 import logging
+from contextlib import nullcontext
 from typing import Any, Iterable, Optional, Set, Tuple
 
 import torch
@@ -39,6 +40,7 @@ from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
+    maybe_remap_kv_scale_name,
     sharded_weight_loader,
 )
 from sglang.srt.models.qwen2_moe import Qwen2MoeMLP, Qwen2MoeSparseMoeBlock
@@ -53,6 +55,7 @@ from sglang.srt.utils import (
     make_layers,
     set_weight_attrs,
 )
+from sglang.srt.utils.common import is_sm120_supported
 
 logger = logging.getLogger(__name__)
 
@@ -886,9 +889,12 @@ class Qwen3NextModel(nn.Module):
 
         residual = None
         aux_hidden_states = []
+        use_nullcontext = not get_global_server_args().disable_piecewise_cuda_graph
+        recorder = get_global_expert_distribution_recorder()
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            with get_global_expert_distribution_recorder().with_current_layer(i):
+            ctx = nullcontext() if use_nullcontext else recorder.with_current_layer(i)
+            with ctx:
                 hidden_states, residual = layer(
                     layer_id=i,
                     positions=positions,
@@ -999,16 +1005,17 @@ class Qwen3NextForCausalLM(nn.Module):
         )
 
     def get_embed_and_head(self):
-        return self.model.embed_tokens.weight, self.lm_head.weight
+        return self.model.embed_tokens.weight, getattr(self.lm_head, "weight", None)
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
 
     def set_embed_and_head(self, embed, head):
         del self.model.embed_tokens.weight
-        del self.lm_head.weight
         self.model.embed_tokens.weight = embed
-        self.lm_head.weight = head
+        if head is not None and hasattr(self.lm_head, "weight"):
+            del self.lm_head.weight
+            self.lm_head.weight = head
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
@@ -1090,6 +1097,11 @@ class Qwen3NextForCausalLM(nn.Module):
             elif name.endswith(".v_proj.v_scale"):
                 name = name.replace(".v_proj.v_scale", ".attn.v_scale")
 
+            if "scale" in name:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -1157,6 +1169,15 @@ class Qwen3NextForCausalLM(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        # Post-quantize large BF16 GDN layers to NVFP4 on SM120
+        if is_sm120_supported():
+            from sglang.srt.layers.quantization.nvfp4_post_quant import (
+                apply_nvfp4_post_quant,
+            )
+
+            apply_nvfp4_post_quant(self, layer_patterns=["in_proj_qkvz"])
+
         return loaded_params
 
     @classmethod
