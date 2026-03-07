@@ -1354,14 +1354,22 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
 
         input_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            data=torch.full(
+                (len(output_partition_sizes),),
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
 
         layer.register_parameter("input_scale", input_scale)
 
         weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            data=torch.full(
+                (len(output_partition_sizes),),
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight_scale_2", weight_scale_2)
@@ -1663,13 +1671,21 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             else (layer.num_local_experts,)
         )
         w13_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(w13_weight_scale_shape, dtype=torch.float32),
+            data=torch.full(
+                w13_weight_scale_shape,
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
 
         w2_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(layer.num_local_experts, dtype=torch.float32),
+            data=torch.full(
+                (layer.num_local_experts,),
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
@@ -1680,14 +1696,22 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
 
         w13_input_scale_shape = (layer.num_experts, num_shards)
         w13_input_scale = PerTensorScaleParameter(
-            data=torch.empty(w13_input_scale_shape, dtype=torch.float32),
+            data=torch.full(
+                w13_input_scale_shape,
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         w13_input_scale._sglang_require_global_experts = True
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
-            data=torch.empty(layer.num_experts, dtype=torch.float32),
+            data=torch.full(
+                (layer.num_experts,),
+                torch.finfo(torch.float32).min,
+                dtype=torch.float32,
+            ),
             weight_loader=weight_loader,
         )
         w2_input_scale._sglang_require_global_experts = True

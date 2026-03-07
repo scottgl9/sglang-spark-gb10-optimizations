@@ -58,7 +58,7 @@ def get_moe_configs(
         )
         return None
     # Supported Triton versions, should be sorted from the newest to the oldest
-    supported_triton_versions = ["3.4.0", "3.3.1", "3.2.0", "3.1.0"]
+    supported_triton_versions = ["3.5.1", "3.5.0", "3.4.0", "3.3.1", "3.2.0", "3.1.0"]
 
     # First look up if an optimized configuration is available in the configs
     # directory
