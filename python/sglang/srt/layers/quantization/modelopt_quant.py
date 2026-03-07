@@ -1925,6 +1925,15 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
                     hidden_size=hidden_size,
                 )  # k
 
+        # Optionally convert to sparse FP4 for decode acceleration
+        from sglang.srt.layers.moe.sparse_fp4.kernel import (
+            convert_nvfp4_to_sparse,
+            is_sparse_fp4_enabled,
+        )
+
+        if is_sparse_fp4_enabled():
+            convert_nvfp4_to_sparse(layer)
+
     @property
     def load_up_proj_weight_first(self) -> bool:
         # FlashInfer CUTLASS kernel assumes [Up, Gate] Proj as W13
@@ -1955,6 +1964,28 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             activation in ACT_STR_TO_TYPE_MAP
         ), f"{activation=} missing from {ACT_STR_TO_TYPE_MAP.keys()=}"
         moe_runner_config = self.moe_runner_config
+
+        # Sparse FP4 GEMV path for decode (small batch sizes)
+        from sglang.srt.layers.moe.sparse_fp4.kernel import has_sparse_weights
+
+        if has_sparse_weights(layer) and x.shape[0] <= 2:
+            from sglang.srt.layers.moe.sparse_fp4.kernel import (
+                sparse_fp4_moe_forward,
+            )
+            from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
+
+            topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
+            expert_map = getattr(layer, "expert_map", None)
+            output = sparse_fp4_moe_forward(
+                hidden_states=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
+                layer=layer,
+                inter_size=layer.intermediate_size_per_partition,
+                apply_router_weight_on_input=moe_runner_config.apply_router_weight_on_input,
+            ).to(x.dtype)
+            return StandardCombineInput(hidden_states=output)
 
         # FlashInfer TRTLLM FP4 path - layer has shuffled weights only when
         # backend is flashinfer_trtllm
