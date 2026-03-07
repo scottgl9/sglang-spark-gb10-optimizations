@@ -223,7 +223,7 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
                     or runner.server_args.attention_backend == "trtllm_mha"
                     or runner.server_args.attention_backend == "fa4"
                     or runner.server_args.attention_backend == "flashinfer"
-                ), "triton, trtllm_mha, fa4, or flashinfer backend are the only supported backends on Blackwell GPUs for hybrid GDN models, use --attention-backend to specify the backend."
+                ), "triton, trtllm_mha, fa4, or flashinfer backend are the only supported backends on Blackwell GPUs for hybrid GDN models, use --attention-backend triton or --attention-backend flashinfer to specify the backend."
             if is_npu():
                 assert (
                     runner.server_args.attention_backend == "ascend"
