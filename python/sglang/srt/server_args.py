@@ -3365,6 +3365,20 @@ class ServerArgs:
                     "speculative_eagle_topk > 1 with page_size > 1 is unstable and produces incorrect results for paged attention backends. This combination is only supported for the 'flashinfer' backend."
                 )
 
+        # SM120+: auto-enable decode attention mode for MTP speculative decoding.
+        # FlashInfer 0.6.4+ decode path works correctly with bf16 Q + fp8 KV + head_dim=256.
+        if (
+            self.speculative_algorithm is not None
+            and self.speculative_attention_mode == "prefill"
+            and (is_sm100_supported() or is_sm120_supported())
+            and is_flashinfer_available()
+        ):
+            self.speculative_attention_mode = "decode"
+            logger.info(
+                "Auto-enabled speculative_attention_mode='decode' for SM100+/SM120+ "
+                "with FlashInfer (faster than prefill mode for draft verification)."
+            )
+
         if self.speculative_algorithm == "NGRAM":
             if not self.device.startswith("cuda"):
                 raise ValueError(

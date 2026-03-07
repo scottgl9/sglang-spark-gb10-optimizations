@@ -2491,6 +2491,21 @@ def set_cuda_arch():
             f"{arch}{'a' if capability[0] >= 9 else ''}"
         )
 
+        # SM121 (GB10): apply FlashInfer compatibility patches
+        if capability == (12, 1):
+            from sglang.srt.utils.gb10_flashinfer_compat import (
+                ensure_flashinfer_sm121_compat,
+            )
+
+            ensure_flashinfer_sm121_compat()
+
+    # SM121 (GB10): Triton's bundled ptxas (CUDA 12.8) rejects sm_121a.
+    # Auto-set TRITON_PTXAS_PATH to the system ptxas if not already set.
+    if "TRITON_PTXAS_PATH" not in os.environ:
+        _system_ptxas = "/usr/local/cuda/bin/ptxas"
+        if os.path.isfile(_system_ptxas):
+            os.environ["TRITON_PTXAS_PATH"] = _system_ptxas
+
 
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
