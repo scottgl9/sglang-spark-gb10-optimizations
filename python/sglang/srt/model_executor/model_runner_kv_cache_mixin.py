@@ -131,14 +131,34 @@ class ModelRunnerKVCacheMixin:
                 )
 
             if is_float4_e2m1fn_x2(self.kv_cache_dtype):
-                # kv_scale_buffer
+                # kv_scale_buffer: 1 scale byte per 16 FP4 elements, for K and V
                 scale_block_size = 16
 
-                n = self.model_config.get_num_kv_heads(get_attention_tp_size())
-                k = self.model_config.head_dim
-                cell_size = (cell_size // 2) + (
-                    (n * k * num_layers * 2 * kv_size) // scale_block_size
-                )
+                if self.model_config.is_hybrid_swa:
+                    # Account for different head dims in full vs SWA layers
+                    full_scale = (
+                        self.model_config.get_num_kv_heads(get_attention_tp_size())
+                        * self.model_config.head_dim
+                        * full_layers_num
+                        * 2
+                        * kv_size
+                    ) // scale_block_size
+                    swa_scale = (
+                        self.model_config.get_swa_num_kv_heads(
+                            get_attention_tp_size()
+                        )
+                        * self.model_config.swa_head_dim
+                        * swa_layers_num
+                        * 2
+                        * kv_size
+                    ) // scale_block_size
+                    cell_size = (cell_size // 2) + full_scale + swa_scale
+                else:
+                    n = self.model_config.get_num_kv_heads(get_attention_tp_size())
+                    k = self.model_config.head_dim
+                    cell_size = (cell_size // 2) + (
+                        (n * k * num_layers * 2 * kv_size) // scale_block_size
+                    )
         return cell_size
 
     def profile_max_num_token(self: ModelRunner, pre_model_load_memory: int):
