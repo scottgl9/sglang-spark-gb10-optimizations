@@ -453,6 +453,11 @@ class ModelOptFp8Config(ModelOptQuantConfig):
                     and kv_cache_scheme.get("num_bits") == 8
                 ):
                     kv_cache_quant_method = "FP8"
+                elif (
+                    kv_cache_scheme.get("type") == "float"
+                    and kv_cache_scheme.get("num_bits") == 4
+                ):
+                    kv_cache_quant_method = "NVFP4"
 
             # Map 'ignore' field to 'exclude_modules'
             exclude_modules = config.get("ignore")
@@ -1202,6 +1207,11 @@ class ModelOptFp4Config(ModelOptQuantConfig):
                     and kv_cache_scheme.get("num_bits") == 8
                 ):
                     kv_cache_quant_algo = "FP8"
+                elif (
+                    kv_cache_scheme.get("type") == "float"
+                    and kv_cache_scheme.get("num_bits") == 4
+                ):
+                    kv_cache_quant_algo = "NVFP4"
                 else:
                     kv_cache_quant_algo = "auto"
             elif isinstance(kv_cache_scheme, str):
