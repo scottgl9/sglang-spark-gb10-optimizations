@@ -211,6 +211,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         )
         self.init_token_map()
         self.init_lm_head()
+        self.maybe_quantize_mtp_fp8()
 
         if get_spec().speculative_use_rejection_sampling:
             target_vocab_size = self.target_worker.model_config.vocab_size
@@ -325,6 +326,14 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             # Share the embedding and lm_head
             self.draft_runner.model.set_embed_and_head(embed, head)
             maybe_share_target_lm_head()
+
+    def maybe_quantize_mtp_fp8(self):
+        """Apply FP8 post-quantization to MTP draft model if SGLANG_MTP_FP8=1."""
+        from sglang.srt.layers.quantization.fp8_post_quant import (
+            maybe_quantize_mtp_fp8,
+        )
+
+        maybe_quantize_mtp_fp8(self.draft_runner.model)
 
     def init_attention_backend(self):
         # Create multi-step attn backends and cuda graph runners

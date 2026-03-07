@@ -151,7 +151,7 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
         )
 
     def get_embed_and_head(self):
-        return self.model.embed_tokens.weight, self.lm_head.weight
+        return self.model.embed_tokens.weight, getattr(self.lm_head, "weight", None)
 
     def set_embed_and_head(self, embed, head):
         # A last-stage draft can share only the target lm_head under PP; retain its
@@ -159,8 +159,9 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
         if embed is not None:
             del self.model.embed_tokens.weight
             self.model.embed_tokens.weight = embed
-        if head is not None and not self.config.tie_word_embeddings:
-            del self.lm_head.weight
+        if head is not None and hasattr(self.lm_head, "weight"):
+            if not self.config.tie_word_embeddings:
+                del self.lm_head.weight
             self.lm_head.weight = head
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
