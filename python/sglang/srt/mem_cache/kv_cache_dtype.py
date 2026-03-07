@@ -17,6 +17,8 @@ TORCH_DTYPE_TO_KV_CACHE_STR = {
     torch.float8_e5m2: "fp8_e5m2",
     torch.bfloat16: "bf16",
 }
+if hasattr(torch, "float4_e2m1fn_x2"):
+    TORCH_DTYPE_TO_KV_CACHE_STR[torch.float4_e2m1fn_x2] = "fp4_e2m1"
 
 
 def configure_kv_cache_dtype(
@@ -43,6 +45,19 @@ def configure_kv_cache_dtype(
         ):
             kv_cache_dtype = fp8_dtype if _is_hip else torch.float8_e4m3fn
             resolved_kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[kv_cache_dtype]
+        elif (
+            isinstance(kv_cache_quant_algo, str)
+            and kv_cache_quant_algo.upper() == "NVFP4"
+        ):
+            if not hasattr(torch, "float4_e2m1fn_x2"):
+                raise ValueError(
+                    "Model requests NVFP4 KV cache but "
+                    "torch.float4_e2m1fn_x2 is unavailable. Please use PyTorch "
+                    "2.8.0+ with CUDA 12.8+."
+                )
+            kv_cache_dtype = torch.float4_e2m1fn_x2
+            resolved_kv_cache_dtype = "fp4_mx_block16"
+            logger.info("Auto-detected NVFP4 KV cache from model quantization config.")
         else:
             kv_cache_dtype = model_dtype
     elif server_args_kv_cache_dtype == "fp8_e5m2":
