@@ -5417,6 +5417,21 @@ class ServerArgs:
             # backend + page size defaults to _qwen3_5_hybrid_overrides.
             pass
 
+                # SM12.x: auto-select flashinfer for GatedDeltaNet linear attention.
+                # FlashInfer GDN CUTLASS kernels require SM90+ (capability[0] >= 9)
+                # which includes SM120. The Triton fallback lacks pipelining for
+                # the recurrent SSM state update, making flashinfer faster on Blackwell.
+                if (
+                    is_sm120_supported()
+                    and is_flashinfer_available()
+                    and self.linear_attn_backend == "triton"
+                ):
+                    self.linear_attn_backend = "flashinfer"
+                    logger.info(
+                        "Auto-selected flashinfer linear attention backend for SM120 "
+                        f"({model_arch}): FlashInfer GDN CUTLASS kernels support SM90+."
+                    )
+
         elif model_arch in ["Glm4MoeForCausalLM"]:
             # The quantization/moe_runner_backend/enable_tf32_matmul resolution
             # moved to the override registry (arg_groups/overrides.py:
