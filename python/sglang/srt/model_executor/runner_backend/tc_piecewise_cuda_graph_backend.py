@@ -148,6 +148,29 @@ class TcPiecewiseCudaGraphBackend(BaseCudaGraphBackend):
                     self._pool = self._device_module.graph_pool_handle()
                 set_graph_pool_id(self._pool)
 
+                # Pre-warm flashinfer FP4 JIT kernels and cache allow_in_graph-wrapped
+                # function references before torch.compile starts.
+                # TorchDynamo (fullgraph=True) cannot trace into get_fp4_quantization_module
+                # because its body runs build_and_load() -> subprocess.run() -> threading.Lock()
+                # -> _thread.allocate_lock (untraceable C builtin).
+                # _ensure_fp4_fns_cached() loads the JIT module eagerly, then stores
+                # torch._dynamo.allow_in_graph-wrapped refs in module-level globals so
+                # fp4_quantize() and block_scale_interleave() use them directly during
+                # compilation without ever calling get_fp4_quantization_module() again.
+                try:
+                    from flashinfer.fp4_quantization import _ensure_fp4_fns_cached
+                    import torch
+
+                    major, minor = torch.cuda.get_device_capability()
+                    arch_key = f"{major}{minor}"
+                    _ensure_fp4_fns_cached(arch_key)
+                    logger.info(
+                        f"Pre-warmed FP4 kernel fns (allow_in_graph) for SM {major}.{minor} "
+                        f"(arch_key={arch_key!r}) before torch.compile"
+                    )
+                except Exception as e:
+                    logger.warning(f"Pre-warm of FP4 kernel fns failed (non-fatal): {e}")
+
                 self.install_compile(
                     language_model.model,
                     compile_config=self._compile_config,

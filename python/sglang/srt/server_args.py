@@ -2676,6 +2676,21 @@ class ServerArgs:
                     sm100_default_attention_backend=sm100_default_attn_backend,
                 )
 
+                # SM12.x: auto-select flashinfer for GatedDeltaNet linear attention.
+                # FlashInfer GDN CUTLASS kernels require SM90+ (capability[0] >= 9)
+                # which includes SM120. The Triton fallback lacks pipelining for
+                # the recurrent SSM state update, making flashinfer faster on Blackwell.
+                if (
+                    is_sm120_supported()
+                    and is_flashinfer_available()
+                    and self.linear_attn_backend == "triton"
+                ):
+                    self.linear_attn_backend = "flashinfer"
+                    logger.info(
+                        "Auto-selected flashinfer linear attention backend for SM120 "
+                        f"({model_arch}): FlashInfer GDN CUTLASS kernels support SM90+."
+                    )
+
         elif model_arch == "MiniCPMV4_6ForConditionalGeneration":
             # 4.6 wraps a Qwen3.5 hybrid GDN backbone, so it needs the same
             # mamba radix cache handling as Qwen3_5ForConditionalGeneration.
