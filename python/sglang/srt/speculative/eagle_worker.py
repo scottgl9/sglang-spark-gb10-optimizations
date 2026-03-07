@@ -183,6 +183,13 @@ class EAGLEWorker(TpModelWorker):
             # Share the embedding and lm_head
             self.draft_model_runner.model.set_embed_and_head(embed, head)
 
+        # Apply FP8 post-quantization to MTP draft model if SGLANG_MTP_FP8=1
+        from sglang.srt.layers.quantization.fp8_post_quant import (
+            maybe_quantize_mtp_fp8,
+        )
+
+        maybe_quantize_mtp_fp8(self.draft_model_runner.model)
+
         # Init attention backend and cuda graphs
         self.draft_model_runner.server_args.disable_cuda_graph = (
             backup_disable_cuda_graph
