@@ -237,6 +237,8 @@ TORCH_DTYPE_TO_KV_CACHE_STR = {
     torch.float8_e5m2: "fp8_e5m2",
     torch.bfloat16: "bf16",
 }
+if hasattr(torch, "float4_e2m1fn_x2"):
+    TORCH_DTYPE_TO_KV_CACHE_STR[torch.float4_e2m1fn_x2] = "fp4_e2m1"
 
 
 def add_mla_attention_backend(backend_name):
@@ -2038,6 +2040,28 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     self.server_args.kv_cache_dtype = TORCH_DTYPE_TO_KV_CACHE_STR[
                         self.kv_cache_dtype
                     ]
+            elif (
+                isinstance(kv_cache_quant_algo, str)
+                and kv_cache_quant_algo.upper() == "NVFP4"
+            ):
+                if hasattr(torch, "float4_e2m1fn_x2"):
+                    self.kv_cache_dtype = torch.float4_e2m1fn_x2
+                    self.server_args.kv_cache_dtype = "fp4_e2m1"
+                    logger.info(
+                        "Auto-detected NVFP4 KV cache from model quantization config."
+                    )
+                    # Auto-switch attention backend if current one doesn't
+                    # support FP4 KV cache (e.g. flashinfer MHA on SM121).
+                    self._ensure_fp4_compatible_attention_backend()
+                    # Validate FP4 backend compatibility (normally checked at
+                    # ServerArgs init, but auto-detection happens after that).
+                    self.server_args._handle_kv4_compatibility()
+                else:
+                    logger.warning(
+                        "Model requests NVFP4 KV cache but torch.float4_e2m1fn_x2 "
+                        "is not available. Falling back to model dtype."
+                    )
+                    self.kv_cache_dtype = self.dtype
             else:
                 self.kv_cache_dtype = self.dtype
         elif self.server_args.kv_cache_dtype == "fp8_e5m2":
@@ -2067,6 +2091,41 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
 
         log_info_on_rank0(logger, f"Using KV cache dtype: {self.kv_cache_dtype}")
+
+    def _ensure_fp4_compatible_attention_backend(self):
+        """Switch attention backend to a FP4-compatible one if needed.
+
+        Called after auto-detecting NVFP4 KV cache from model config, since
+        the default backend selection happened before we knew about FP4.
+        """
+        sa = self.server_args
+        use_mla = sa.use_mla_backend()
+        prefill_str, decode_str = sa.get_attention_backends()
+
+        if use_mla:
+            KV4_MLA_CHOICES = {"cutlass_mla", "flashinfer", "trtllm_mla", "flashmla"}
+            fallback = "trtllm_mla"
+            backend = sa.attention_backend or decode_str
+            if backend not in KV4_MLA_CHOICES:
+                logger.warning(
+                    f"Auto-detected NVFP4 KV cache but MLA attention backend "
+                    f"'{backend}' is not FP4-compatible. "
+                    f"Switching to '{fallback}'. "
+                    f"Compatible backends: {sorted(KV4_MLA_CHOICES)}"
+                )
+                sa.attention_backend = fallback
+        else:
+            KV4_MHA_CHOICES = {"triton", "torch_native", "flex_attention", "trtllm_mha"}
+            fallback = "triton"
+            backend = sa.attention_backend or decode_str
+            if backend not in KV4_MHA_CHOICES:
+                logger.warning(
+                    f"Auto-detected NVFP4 KV cache but MHA attention backend "
+                    f"'{backend}' is not FP4-compatible. "
+                    f"Switching to '{fallback}'. "
+                    f"Compatible backends: {sorted(KV4_MHA_CHOICES)}"
+                )
+                sa.attention_backend = fallback
 
     def init_cublas(self):
         """We need to run a small matmul to init cublas. Otherwise, it will raise some errors later."""
