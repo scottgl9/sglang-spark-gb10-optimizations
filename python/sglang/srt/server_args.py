@@ -7836,6 +7836,19 @@ class ServerArgs:
                 not self.enable_mixed_chunk
             ), "enable_mixed_chunk is required for speculative decoding"
 
+            # SM120+: auto-enable decode attention mode for MTP speculative decoding.
+            # FlashInfer 0.6.4+ decode path works correctly with bf16 Q + fp8 KV + head_dim=256.
+            if (
+                self.speculative_attention_mode == "prefill"
+                and (is_sm100_supported() or is_sm120_supported())
+                and is_flashinfer_available()
+            ):
+                self.speculative_attention_mode = "decode"
+                logger.info(
+                    "Auto-enabled speculative_attention_mode='decode' for SM100+/SM120+ "
+                    "with FlashInfer (faster than prefill mode for draft verification)."
+                )
+
         # Check chunked prefill
         # Skip validation if chunked prefill is disabled (i.e., size <= 0).
         # Skip validation if disaggregation mode is decode.
