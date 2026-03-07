@@ -2066,7 +2066,21 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     )
                     self.kv_cache_dtype = self.dtype
             else:
-                self.kv_cache_dtype = self.dtype
+                # No KV cache quant algo specified by model. On Blackwell+
+                # (SM100/SM120), default to FP8 KV cache — halves KV read
+                # bandwidth with negligible quality impact, critical for
+                # bandwidth-limited devices like GB10 (273 GB/s LPDDR5X).
+                major, _ = torch.cuda.get_device_capability()
+                if not _is_hip and major >= 10:
+                    self.kv_cache_dtype = torch.float8_e4m3fn
+                    self.server_args.kv_cache_dtype = "fp8_e4m3"
+                    logger.info(
+                        "Auto-selected FP8 KV cache (fp8_e4m3) on SM%d for "
+                        "reduced memory bandwidth usage.",
+                        major * 10,
+                    )
+                else:
+                    self.kv_cache_dtype = self.dtype
         elif self.server_args.kv_cache_dtype == "fp8_e5m2":
             if _is_hip:  # Using natively supported format
                 self.kv_cache_dtype = fp8_dtype
