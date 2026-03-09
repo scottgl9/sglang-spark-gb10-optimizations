@@ -224,6 +224,21 @@ class EagleDraftWorker(BaseDraftWorker):
             # Share the embedding and lm_head
             self.draft_runner.model.set_embed_and_head(embed, head)
 
+            # If the target lm_head was FP8-quantized (SGLANG_QUANTIZE_LM_HEAD_FP8),
+            # also share the weight_scale with the draft model. The draft model's
+            # lm_head may not have its own checkpoint weights, so its weight_scale
+            # (computed from uninitialized data) would be wrong.
+            target_lm_head = self.target_worker.model_runner.model.lm_head
+            draft_lm_head = self.draft_runner.model.lm_head
+            if hasattr(target_lm_head, "weight_scale") and hasattr(
+                draft_lm_head, "weight_scale"
+            ):
+                draft_lm_head.weight_scale = target_lm_head.weight_scale
+            if hasattr(target_lm_head, "input_scale") and hasattr(
+                draft_lm_head, "input_scale"
+            ):
+                draft_lm_head.input_scale = target_lm_head.input_scale
+
     def maybe_quantize_mtp_fp8(self):
         """Apply FP8 post-quantization to MTP draft model if SGLANG_MTP_FP8=1."""
         from sglang.srt.layers.quantization.fp8_post_quant import (
