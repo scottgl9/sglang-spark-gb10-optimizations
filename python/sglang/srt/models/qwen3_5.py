@@ -79,6 +79,7 @@ from sglang.srt.models.qwen2_moe import Qwen2MoeMLP, Qwen2MoeSparseMoeBlock
 
 # Models
 from sglang.srt.models.qwen3_vl import Qwen3VLForConditionalGeneration
+from sglang.srt.models.utils import WeightsMapper
 from sglang.srt.server_args import get_global_server_args
 
 # Utils
@@ -202,8 +203,16 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             torch.empty(self.num_v_heads // self.attn_tp_size, dtype=torch.float32),
         )
 
-        set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
-        set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
+        # FlashInfer GDN kernels require A_log and dt_bias in float32.
+        # The NVFP4 checkpoint stores them as BF16, so cast on load.
+        # NOTE: param.data may be BF16 (created under set_default_torch_dtype),
+        # so we must reassign param.data rather than copy_ into it (copy_ would
+        # cast the float32 source to match the BF16 destination tensor dtype).
+        def _fp32_weight_loader(param, loaded_weight):
+            param.data = loaded_weight.to(device=param.device, dtype=torch.float32)
+
+        set_weight_attrs(self.A_log, {"weight_loader": _fp32_weight_loader})
+        set_weight_attrs(self.dt_bias, {"weight_loader": _fp32_weight_loader})
 
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
@@ -1349,6 +1358,22 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
     if _is_gfx95 or _is_npu:
         packed_modules_mapping = Qwen3_5ForCausalLM.packed_modules_mapping
         hf_to_sglang_mapper = None
+    else:
+        # The parent class (Qwen3VLForConditionalGeneration) maps
+        # "model.language_model." → "language_model.model." for quantization ignore-
+        # list matching.  For Qwen3.5 the layer construction prefix is already
+        # "model.language_model.*", so the parent mapping breaks ignore matching and
+        # causes GatedDeltaNet (linear_attn) projection weights — which are BF16 in
+        # the NVFP4 checkpoint — to be incorrectly quantized at load time.
+        # Override to keep "model.language_model.*" as-is; only remap visual keys.
+        hf_to_sglang_mapper = WeightsMapper(
+            orig_to_new_substr={
+                "attn.qkv": "attn.qkv_proj",
+            },
+            orig_to_new_prefix={
+                "model.visual.": "visual.",
+            },
+        )
 
     def __init__(
         self,
@@ -1364,7 +1389,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
         )
         self.is_mrope_enabled = "mrope_section" in rope_config
 
-        self.deepstack_visual_indexes = self.visual.deepstack_visual_indexes
+        self.deepstack_visual_indexes = (
+            self.visual.deepstack_visual_indexes if self.visual is not None else []
+        )
 
     @property
     def start_layer(self) -> int:
@@ -1499,6 +1526,16 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
     if _is_gfx95 or _is_npu:
         packed_modules_mapping = Qwen3_5ForCausalLM.packed_modules_mapping
         hf_to_sglang_mapper = None
+    else:
+        # Same mapper override as Qwen3_5ForConditionalGeneration — see comment there.
+        hf_to_sglang_mapper = WeightsMapper(
+            orig_to_new_substr={
+                "attn.qkv": "attn.qkv_proj",
+            },
+            orig_to_new_prefix={
+                "model.visual.": "visual.",
+            },
+        )
 
     def __init__(
         self,
@@ -1513,7 +1550,9 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         )
         self.is_mrope_enabled = "mrope_section" in rope_config
 
-        self.deepstack_visual_indexes = self.visual.deepstack_visual_indexes
+        self.deepstack_visual_indexes = (
+            self.visual.deepstack_visual_indexes if self.visual is not None else []
+        )
         self.num_fused_shared_experts = 0
         if _use_aiter:
             self.num_fused_shared_experts = self._get_num_fused_shared_experts()
