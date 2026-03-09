@@ -72,6 +72,10 @@ class Fp4PostQuantLinearMethod:
             out = out + bias
         return out.view(*output_shape)
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Called by the loader after all weights are loaded. No-op for post-quant layers."""
+        pass
+
 
 def quantize_linear_bf16_to_nvfp4(layer: torch.nn.Module, layer_name: str) -> bool:
     """Quantize a single BF16 linear layer to NVFP4 in-place.
@@ -118,10 +122,27 @@ def quantize_linear_bf16_to_nvfp4(layer: torch.nn.Module, layer_name: str) -> bo
             FP4_MAX * FP8_MAX / amax.item(), dtype=torch.float32, device=device
         )
 
-    weight_packed, weight_blockscale = fp4_quantize(weight, weight_global_scale)
+    backend = get_fp4_gemm_runner_backend()
+
+    # For non-trtllm backends (e.g. flashinfer_cutlass / sgl_kernel) we need
+    # sgl-kernel's scaled_fp4_quant which returns float8_e4m3fn block-scales
+    # compatible with swizzle_blockscale().  flashinfer.fp4_quantize returns
+    # uint8 scales (already swizzled for flashinfer's own GEMM path) which
+    # cause an AssertionError in swizzle_blockscale().
+    if not backend.is_flashinfer_trtllm():
+        try:
+            from sglang.jit_kernel.nvfp4 import scaled_fp4_quant as sgl_fp4_quantize
+
+            weight_packed, weight_blockscale = sgl_fp4_quantize(
+                weight, weight_global_scale
+            )
+        except ImportError:
+            weight_packed, weight_blockscale = fp4_quantize(weight, weight_global_scale)
+    else:
+        weight_packed, weight_blockscale = fp4_quantize(weight, weight_global_scale)
 
     # Process weight scales (swizzle or shuffle depending on backend)
-    if get_fp4_gemm_runner_backend().is_flashinfer_trtllm():
+    if backend.is_flashinfer_trtllm():
         from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
 
         epilogue_tile_m = 128
@@ -141,6 +162,11 @@ def quantize_linear_bf16_to_nvfp4(layer: torch.nn.Module, layer_name: str) -> bo
     alpha = Parameter(
         1.0 / (input_global_scale * weight_global_scale), requires_grad=False
     )
+
+    # Release the BF16 weight tensor before registering FP4 parameters.
+    # 'weight' holds a reference that keeps the tensor alive; deleting it now
+    # frees ~2× the layer's memory (BF16 + FP4) rather than peak 2× at function exit.
+    del weight
 
     # Remove old weight and register new parameters
     if hasattr(layer, "weight"):
@@ -213,4 +239,6 @@ def apply_nvfp4_post_quant(
             f"NVFP4 post-quantization: converted {converted} layers "
             f"matching patterns {layer_patterns}"
         )
+        # Flush freed BF16 tensors from the CUDA allocator.
+        torch.cuda.empty_cache()
     return converted
