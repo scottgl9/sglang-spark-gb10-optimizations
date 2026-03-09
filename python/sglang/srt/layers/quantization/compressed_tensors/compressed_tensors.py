@@ -164,6 +164,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         prefix: str,
     ) -> Optional[QuantizeMethodBase]:
         from sglang.srt.layers.linear import LinearBase
+        from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+
+        # If lm_head_fp8_config is set, apply FP8 to lm_head (ParallelLMHead).
+        # ParallelLMHead extends VocabParallelEmbedding (not LinearBase), so
+        # it must be checked before the LinearBase branch. Fp8LinearMethod's
+        # create_weights / process_weights_after_loading / apply are compatible
+        # with any module that stores a weight Parameter.
+        if (
+            self.lm_head_fp8_config is not None
+            and isinstance(layer, ParallelLMHead)
+            and prefix.endswith("lm_head")
+        ):
+            return Fp8LinearMethod(self.lm_head_fp8_config)
 
         if isinstance(layer, LinearBase):
             # If lm_head_fp8_config is set, apply FP8 specifically to lm_head.
