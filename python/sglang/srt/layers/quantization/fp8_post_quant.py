@@ -81,11 +81,8 @@ class FP8PostQuantLinear(torch.nn.Module):
         # Dynamic per-token activation quantization
         x_flat = x.reshape(-1, x.shape[-1])
         x_amax = x_flat.abs().max()
-        if x_amax == 0:
-            return torch.zeros(
-                *x.shape[:-1], self.weight.shape[0], dtype=x.dtype, device=x.device
-            )
-        x_scale = x_amax.float() / FP8_MAX
+        # Clamp to avoid division by zero (no host-device sync — CUDA graph safe)
+        x_scale = (x_amax.float() / FP8_MAX).clamp(min=1e-12)
         x_fp8 = (x_flat.float() / x_scale).clamp(-FP8_MAX, FP8_MAX).to(FP8_DTYPE)
 
         out = torch._scaled_mm(
@@ -185,6 +182,16 @@ def quantize_mtp_moe_fp8(mtp_model: torch.nn.Module) -> int:
 
     Returns the number of MoE layers quantized.
     """
+    # SM120+ (Blackwell): Triton doesn't support fp8e4nv in tl.dot, so MoE
+    # FP8 quantization is not compatible with the triton MoE kernel path.
+    from sglang.srt.utils.common import is_sm120_supported
+
+    if is_sm120_supported():
+        logger.info(
+            "quantize_mtp_moe_fp8: skipping on SM120+ (Triton fp8e4nv "
+            "dot not supported); FC layers still benefit from FP8"
+        )
+        return 0
     from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
 
     count = 0
