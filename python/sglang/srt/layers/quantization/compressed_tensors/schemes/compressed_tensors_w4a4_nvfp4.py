@@ -25,6 +25,61 @@ from sglang.srt.layers.quantization.utils import swizzle_blockscale
 
 logger = logging.getLogger(__name__)
 
+# FP4 E2M1 lookup table: maps 4-bit values (0-15) to float
+# Bits: SEEM (sign, 2-bit exponent, 1-bit mantissa)
+_FP4_E2M1_LUT = [
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,  # positive
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,  # negative
+]
+
+
+def _is_sm121() -> bool:
+    """Check if running on SM121 (GB10)."""
+    cc = torch.cuda.get_device_capability()
+    return cc[0] == 12 and cc[1] == 1
+
+
+def _dequant_nvfp4_to_bf16(
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    weight_global_scale: torch.Tensor,
+    group_size: int = 16,
+) -> torch.Tensor:
+    """Dequantize NVFP4 packed weights to BF16.
+
+    Args:
+        weight_packed: uint8 [N, K/2], 2 FP4 values per byte
+        weight_scale: float8_e4m3fn [N, K/group_size], per-group scale
+        weight_global_scale: float32 scalar, per-tensor scale
+    Returns:
+        BF16 tensor [N, K]
+    """
+    device = weight_packed.device
+    N, K_half = weight_packed.shape
+    K = K_half * 2
+
+    # Build LUT on device
+    lut = torch.tensor(_FP4_E2M1_LUT, dtype=torch.bfloat16, device=device)
+
+    # Unpack uint8 → two FP4 nibbles
+    low_nibble = (weight_packed & 0x0F).long()
+    high_nibble = ((weight_packed >> 4) & 0x0F).long()
+
+    # Lookup float values and interleave
+    low_vals = lut[low_nibble]
+    high_vals = lut[high_nibble]
+    weight_bf16 = torch.stack([low_vals, high_vals], dim=-1).reshape(N, K)
+
+    # Apply per-group scale (expand from [N, K/group_size] → [N, K])
+    scale_bf16 = weight_scale.to(torch.bfloat16)
+    scale_expanded = scale_bf16.repeat_interleave(group_size, dim=1)
+    weight_bf16 = weight_bf16 * scale_expanded
+
+    # Divide by global scale (global_scale was used to scale UP before quantization)
+    weight_bf16 = weight_bf16 / weight_global_scale.to(torch.bfloat16)
+
+    return weight_bf16
+
 __all__ = ["CompressedTensorsW4A4Fp4"]
 
 
@@ -98,6 +153,26 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsLinearScheme):
             layer.weight_global_scale.max().to(torch.float32), requires_grad=False
         )
 
+        # SM121 (GB10): CUTLASS FP4 GEMM produces corrupt output.
+        # Dequantize weights to BF16 at load time and use standard matmul.
+        if _is_sm121():
+            weight_bf16 = _dequant_nvfp4_to_bf16(
+                layer.weight_packed.data,
+                layer.weight_scale.data,
+                layer.weight_global_scale.data,
+                self.group_size,
+            )
+            layer.weight_dequantized = Parameter(weight_bf16, requires_grad=False)
+            layer._use_bf16_fallback = True
+            # Free FP4 tensors
+            del layer.weight_packed
+            del layer.weight_scale
+            logger.warning(
+                "SM121 (GB10): dequantized NVFP4 linear layer to BF16 "
+                f"(shape {list(weight_bf16.shape)})"
+            )
+            return
+
         if get_fp4_gemm_runner_backend().is_flashinfer_trtllm():
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
@@ -136,6 +211,11 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsLinearScheme):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # SM121 BF16 fallback path
+        if getattr(layer, "_use_bf16_fallback", False):
+            out = torch.nn.functional.linear(x, layer.weight_dequantized, bias)
+            return out
+
         output_dtype = x.dtype
         w_n, _ = layer.weight_packed.shape
         output_shape = [x.shape[0], w_n]
