@@ -323,7 +323,11 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
           global_scale: (E,) bfloat16
         """
         from sglang.jit_kernel.gptq_marlin_repack import gptq_marlin_repack
-        from sglang.srt.layers.quantization.marlin_utils import marlin_moe_permute_scales
+        from sglang.srt.layers.quantization.marlin_utils import (
+            marlin_moe_permute_scales,
+            nvfp4_marlin_process_global_scale,
+            nvfp4_marlin_process_scales,
+        )
 
         E = layer.w13_weight.shape[0]
         # hidden_size K: each uint8 byte holds 2 FP4 values → K = shape[-1]*2
@@ -357,32 +361,38 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         )
         del layer.w2_weight
 
-        # Permute scales to Marlin layout (preserves dtype = float8_e4m3fn)
-        # w13_weight_scale: (E, 2*N, K//16) → transpose to (E, K//16, 2*N)
-        w13_scale_t = layer.w13_weight_scale.permute(0, 2, 1).contiguous()
+        # Permute scales to Marlin layout then apply NVFP4 encoding
+        # w13_weight_scale: (E, 2*N, K//16) → convert to params_dtype, transpose, permute, encode
+        w13_scale_t = layer.w13_weight_scale.to(layer.params_dtype).permute(0, 2, 1).contiguous()
+        w13_scale_permuted = marlin_moe_permute_scales(w13_scale_t, K, 2 * N, self.group_size)
+        w13_scale_list = [nvfp4_marlin_process_scales(w13_scale_permuted[e]) for e in range(E)]
         layer.w13_scale_marlin = torch.nn.Parameter(
-            marlin_moe_permute_scales(w13_scale_t, K, 2 * N, self.group_size),
-            requires_grad=False,
+            torch.stack(w13_scale_list), requires_grad=False
         )
         del layer.w13_weight_scale
 
-        # w2_weight_scale: (E, K, N//16) → transpose to (E, N//16, K)
-        w2_scale_t = layer.w2_weight_scale.permute(0, 2, 1).contiguous()
+        # w2_weight_scale: (E, K, N//16) → same pattern
+        w2_scale_t = layer.w2_weight_scale.to(layer.params_dtype).permute(0, 2, 1).contiguous()
+        w2_scale_permuted = marlin_moe_permute_scales(w2_scale_t, N, K, self.group_size)
+        w2_scale_list = [nvfp4_marlin_process_scales(w2_scale_permuted[e]) for e in range(E)]
         layer.w2_scale_marlin = torch.nn.Parameter(
-            marlin_moe_permute_scales(w2_scale_t, N, K, self.group_size),
-            requires_grad=False,
+            torch.stack(w2_scale_list), requires_grad=False
         )
         del layer.w2_weight_scale
 
-        # Store ORIGINAL global scales (not inverted) for Marlin kernel
-        # The checkpoint stores the actual scale; w*_weight_scale_2 is 1/global_scale
-        # Convert to bfloat16 to match activation dtype
+        # Global scales: Marlin expects the INVERTED scale (1/original_scale)
+        # with exponent bias correction applied, matching vLLM's convention.
+        # layer.w13_weight_scale_2 = 1/w13_weight_global_scale[:, 0] (set earlier)
         layer.w13_global_scale_marlin = torch.nn.Parameter(
-            layer.w13_weight_global_scale[:, 0].to(torch.bfloat16),
+            nvfp4_marlin_process_global_scale(
+                layer.w13_weight_scale_2.to(torch.bfloat16)
+            ),
             requires_grad=False,
         )
         layer.w2_global_scale_marlin = torch.nn.Parameter(
-            layer.w2_weight_global_scale.to(torch.bfloat16),
+            nvfp4_marlin_process_global_scale(
+                layer.w2_weight_scale_2.to(torch.bfloat16)
+            ),
             requires_grad=False,
         )
 
@@ -411,6 +421,9 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         from sgl_kernel import moe_sum_reduce, silu_and_mul
         from sgl_kernel.scalar_type import scalar_types
 
+        import os
+        _DEBUG = os.environ.get("MARLIN_DEBUG", "0") == "1"
+
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
         topk_weights = topk_output.topk_weights
@@ -418,11 +431,16 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
 
         M, K = x.shape
         E = layer.w13_weight_marlin.shape[0]
-        # N: Marlin-repacked w2 has shape (E, N//8, K) in int32 units
-        # w2_weight_marlin[e] came from gptq_marlin_repack(qw, perm, N, K, 4)
-        # so its shape[1] = ceil_div(N, 8); N = w2_scale_marlin.shape[1] * group_size
         N = layer.w2_scale_marlin.shape[1] * self.group_size  # intermediate_size
         topk = topk_ids.shape[1]
+
+        if _DEBUG:
+            x_nan = x.isnan().any().item()
+            logger.info(f"[MARLIN_DEBUG] M={M}, K={K}, N={N}, E={E}, topk={topk}, x.dtype={x.dtype}, x_nan={x_nan}")
+            if x_nan:
+                logger.info(f"[MARLIN_DEBUG] INPUT HAS NaN! x.abs().max()={x[~x.isnan()].abs().max() if (~x.isnan()).any() else 'all-nan'}")
+            logger.info(f"[MARLIN_DEBUG] w13_scale_marlin={layer.w13_scale_marlin.shape}, w2_scale_marlin={layer.w2_scale_marlin.shape}")
+            logger.info(f"[MARLIN_DEBUG] w13_global={layer.w13_global_scale_marlin[:3]}, w2_global={layer.w2_global_scale_marlin[:3]}")
 
         # Block size selection (mirrors fused_marlin_moe)
         block_size_m = 8
@@ -439,6 +457,10 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
             x.dtype == torch.half
             or torch.cuda.get_device_capability(x.device)[0] >= 9
         )
+
+        if _DEBUG:
+            torch.cuda.synchronize()
+            logger.info(f"[MARLIN_DEBUG] pre-GEMM1 ok, sorted_ids={sorted_token_ids.shape}, expert_ids={expert_ids.shape}")
 
         # GEMM 1: x (M, K)  ×  w13 (E, 2*N, K)  →  intermediate1 (M*topk, 2*N)
         intermediate1 = torch.empty(
@@ -471,13 +493,35 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
             use_fp32_reduce=True,
         )
 
+        if _DEBUG:
+            torch.cuda.synchronize()
+            logger.info(f"[MARLIN_DEBUG] GEMM1 ok, intermediate1={intermediate1.shape}, has_nan={intermediate1.isnan().any()}, has_inf={intermediate1.isinf().any()}")
+
         # SiLU + gate-mul: (M*topk, 2*N) → (M*topk, N)
         intermediate2 = torch.empty(
             (M * topk, N), dtype=x.dtype, device=x.device
         )
         silu_and_mul(intermediate1, intermediate2)
 
-        # GEMM 2: intermediate2 (M*topk, N)  ×  w2 (E, K, N)  →  output (M*topk, K)
+        if _DEBUG:
+            torch.cuda.synchronize()
+            i2_nan = intermediate2.isnan().any().item()
+            logger.info(f"[MARLIN_DEBUG] SiLU: intermediate2={intermediate2.shape}, nan={i2_nan}, abs_max={intermediate2[~intermediate2.isnan()].abs().max().item():.4g}" if not i2_nan else f"[MARLIN_DEBUG] SiLU: intermediate2={intermediate2.shape}, nan=True")
+
+        # GEMM 2: intermediate2 (M*topk, N) × w2 (E, K, N) → output (M*topk, K)
+        # Each intermediate row maps to exactly one expert, so recompute routing
+        # with size_m=M*topk and top_k=1.
+        flat_topk_ids = topk_ids.view(-1).unsqueeze(1)  # (M*topk, 1)
+        flat_topk_weights = topk_weights.view(-1).unsqueeze(1)  # (M*topk, 1)
+
+        sorted_token_ids_2, expert_ids_2, num_tokens_post_padded_2 = (
+            moe_align_block_size(flat_topk_ids, block_size_m, E)
+        )
+
+        if _DEBUG:
+            logger.info(f"[MARLIN_DEBUG] pre-GEMM2: flat_topk_ids={flat_topk_ids.shape}, sorted_ids_2={sorted_token_ids_2.shape}, expert_ids_2={expert_ids_2.shape}")
+            logger.info(f"[MARLIN_DEBUG] pre-GEMM2: size_m={M*topk}, size_n={K}, size_k={N}")
+
         output = torch.zeros(
             (M * topk, K), dtype=x.dtype, device=x.device
         )
@@ -492,25 +536,36 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
             g_idx_or_none=None,
             perm_or_none=None,
             workspace=layer.workspace_marlin,
-            sorted_token_ids=sorted_token_ids,
-            expert_ids=expert_ids,
-            num_tokens_post_padded=num_tokens_post_padded,
-            topk_weights=topk_weights,
+            sorted_token_ids=sorted_token_ids_2,
+            expert_ids=expert_ids_2,
+            num_tokens_post_padded=num_tokens_post_padded_2,
+            topk_weights=flat_topk_weights,
             moe_block_size=block_size_m,
             top_k=1,
             mul_topk_weights=True,
             is_ep=False,
             b_q_type=scalar_types.float4_e2m1f,
-            size_m=M,
+            size_m=M * topk,
             size_n=K,
             size_k=N,
             use_atomic_add=use_atomic_add,
             use_fp32_reduce=True,
         )
 
+        if _DEBUG:
+            torch.cuda.synchronize()
+            o_nan = output.isnan().any().item()
+            logger.info(f"[MARLIN_DEBUG] GEMM2: output={output.shape}, nan={o_nan}, abs_max={output[~output.isnan()].abs().max().item():.4g}" if not o_nan else f"[MARLIN_DEBUG] GEMM2: output={output.shape}, nan=True, non_nan_count={(~output.isnan()).sum().item()}")
+
         # Reduce topk expert outputs: (M*topk, K) → (M, K)
         final_output = torch.empty((M, K), dtype=x.dtype, device=x.device)
-        moe_sum_reduce(output.view(M, topk, K), final_output)
+        moe_sum_reduce(output.view(M, topk, K), final_output, 1.0)
+
+        if _DEBUG:
+            torch.cuda.synchronize()
+            fo_nan = final_output.isnan().any().item()
+            fo_abs = final_output[~final_output.isnan()].abs() if not fo_nan else final_output.abs()
+            logger.info(f"[MARLIN_DEBUG] reduce: final_output={final_output.shape}, nan={fo_nan}, abs_max={fo_abs.max().item():.4g}, abs_mean={fo_abs.mean().item():.4g}")
 
         return StandardCombineInput(hidden_states=final_output)
 
