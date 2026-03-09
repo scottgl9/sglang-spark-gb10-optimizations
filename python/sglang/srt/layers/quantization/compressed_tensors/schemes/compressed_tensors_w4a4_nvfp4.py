@@ -154,22 +154,87 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsLinearScheme):
         )
 
         # SM121 (GB10): CUTLASS FP4 GEMM produces corrupt output.
-        # Dequantize weights to BF16 at load time and use standard matmul.
+        # Use Marlin FP4 dense GEMM with on-the-fly dequant instead.
         if _is_sm121():
-            weight_bf16 = _dequant_nvfp4_to_bf16(
-                layer.weight_packed.data,
-                layer.weight_scale.data,
-                layer.weight_global_scale.data,
-                self.group_size,
+            from sglang.jit_kernel.gptq_marlin_repack import gptq_marlin_repack
+            from sglang.srt.layers.quantization.marlin_utils import (
+                marlin_make_workspace,
+                marlin_permute_scales,
+                nvfp4_marlin_interleave_scales,
+                nvfp4_marlin_process_global_scale,
+                nvfp4_marlin_process_scales,
             )
-            layer.weight_dequantized = Parameter(weight_bf16, requires_grad=False)
-            layer._use_bf16_fallback = True
-            # Free FP4 tensors
+
+            N = layer.output_size_per_partition
+            K = layer.input_size_per_partition
+            device = layer.weight_packed.device
+
+            # Alignment check: Marlin requires N%64==0, K%128==0
+            if N % 64 != 0 or K % 128 != 0:
+                logger.warning(
+                    f"SM121 (GB10): Marlin FP4 requires N%64==0, K%128==0 "
+                    f"but got N={N}, K={K}. Falling back to BF16 dequant."
+                )
+                weight_bf16 = _dequant_nvfp4_to_bf16(
+                    layer.weight_packed.data,
+                    layer.weight_scale.data,
+                    layer.weight_global_scale.data,
+                    self.group_size,
+                )
+                layer.weight_dequantized = Parameter(
+                    weight_bf16, requires_grad=False
+                )
+                layer._use_bf16_fallback = True
+                del layer.weight_packed
+                del layer.weight_scale
+                return
+
+            # Repack weights: [N, K/2] uint8 → Marlin tile layout
+            perm = torch.empty(0, dtype=torch.int, device=device)
+            qw_int32 = layer.weight_packed.data.view(torch.int32).T.contiguous()
+            marlin_qw = gptq_marlin_repack(qw_int32, perm, K, N, 4)
+
+            # Transform scales: [N, K/16] fp8 → Marlin S0E5M3 format
+            scale_bf16 = layer.weight_scale.data.to(torch.bfloat16)
+            scale_t = scale_bf16.T.contiguous()  # [K/16, N]
+            scale_permuted = marlin_permute_scales(
+                scale_t, K, N, self.group_size
+            )
+            marlin_scales = nvfp4_marlin_process_scales(scale_permuted)
+
+            # Byte-interleave adjacent K-group scale rows so the Marlin FP4
+            # kernel's warp_row%2 indexing selects the correct per-16 scale
+            # for each K-group (without this, adjacent groups share one scale).
+            marlin_scales = nvfp4_marlin_interleave_scales(
+                marlin_scales, K, N, self.group_size
+            )
+
+            # Process global scale: invert + exponent bias correction
+            # compressed-tensors stores the quantization scale; Marlin needs 1/scale
+            inv_gs = (1.0 / layer.weight_global_scale.data).to(torch.bfloat16)
+            marlin_gs = nvfp4_marlin_process_global_scale(inv_gs)
+
+            # Workspace
+            workspace = marlin_make_workspace(device)
+
+            # Store Marlin parameters
+            layer.marlin_qweight = Parameter(marlin_qw, requires_grad=False)
+            layer.marlin_scales = Parameter(marlin_scales, requires_grad=False)
+            layer.marlin_global_scale = Parameter(
+                marlin_gs.unsqueeze(0), requires_grad=False
+            )
+            layer.marlin_workspace = workspace
+            layer.marlin_size_n = N
+            layer.marlin_size_k = K
+            layer._use_marlin_fp4 = True
+
+            # Free original tensors
             del layer.weight_packed
             del layer.weight_scale
+
             logger.warning(
-                "SM121 (GB10): dequantized NVFP4 linear layer to BF16 "
-                f"(shape {list(weight_bf16.shape)})"
+                f"SM121 (GB10): using Marlin FP4 dense GEMM for NVFP4 layer "
+                f"(N={N}, K={K})"
             )
             return
 
@@ -211,7 +276,52 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsLinearScheme):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # SM121 BF16 fallback path
+        # SM121 Marlin FP4 dense GEMM path
+        if getattr(layer, "_use_marlin_fp4", False):
+            from sglang.jit_kernel.gptq_marlin import gptq_marlin_gemm
+            from sglang.srt.layers.quantization.marlin_utils import (
+                should_use_atomic_add_reduce,
+            )
+            from sgl_kernel.scalar_type import scalar_types
+
+            reshaped_x = x.reshape(-1, x.shape[-1])
+            size_m = reshaped_x.shape[0]
+            size_n = layer.marlin_size_n
+            size_k = layer.marlin_size_k
+
+            use_atomic_add = should_use_atomic_add_reduce(
+                m=size_m, n=size_n, k=size_k,
+                device=x.device, dtype=x.dtype,
+            )
+
+            device = x.device
+            empty_int = torch.empty(0, dtype=torch.int, device=device)
+
+            out = gptq_marlin_gemm(
+                a=reshaped_x,
+                c=None,
+                b_q_weight=layer.marlin_qweight,
+                b_scales=layer.marlin_scales,
+                global_scale=layer.marlin_global_scale,
+                b_zeros=empty_int,
+                g_idx=empty_int,
+                perm=empty_int,
+                workspace=layer.marlin_workspace,
+                b_q_type=scalar_types.float4_e2m1f,
+                size_m=size_m,
+                size_n=size_n,
+                size_k=size_k,
+                is_k_full=True,
+                use_atomic_add=use_atomic_add,
+                use_fp32_reduce=True,
+            )
+
+            out = out.reshape(x.shape[:-1] + (size_n,))
+            if bias is not None:
+                out = out + bias
+            return out
+
+        # SM121 BF16 fallback path (for layers with alignment issues)
         if getattr(layer, "_use_bf16_fallback", False):
             out = torch.nn.functional.linear(x, layer.weight_dequantized, bias)
             return out
