@@ -46,21 +46,19 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
                 " above."
             )
         self.group_size = 16
+
+        # SM121 (GB10): CUTLASS FP4 MoE produces all-zero output on SM121.
+        # TRT-LLM FP4 MoE fails with SM100f cubin mismatch (compiled for B200).
+        # server_args.py routes SM121 + compressed-tensors -> moe_runner_backend=marlin.
+        # Marlin dequants FP4->BF16 per tile on-GPU — works on all GPUs.
+        self.use_marlin = get_moe_runner_backend().is_marlin()
         self.use_flashinfer_trtllm = get_moe_runner_backend().is_flashinfer_trtllm()
 
-        # SM121 (GB10/Spark) workaround: CUTLASS FP4 MoE produces all-zero output on
-        # SM121, causing NaN softmax and garbage token generation (repeated "!" tokens).
-        # Confirmed same bug as vLLM fix "restore Marlin MoE override for SM121".
-        # Force TRT-LLM FP4 MoE backend which uses NVIDIA kernel and is correct on SM121.
-        import torch as _torch
-        if (not self.use_flashinfer_trtllm
-                and _torch.cuda.is_available()
-                and _torch.cuda.get_device_capability() == (12, 1)):
+        if self.use_marlin:
             logger.warning(
-                "SM121 (GB10) detected: CUTLASS FP4 MoE produces all-zero output. "
-                "Forcing flashinfer TRT-LLM FP4 MoE backend."
+                "SM121 (GB10) detected: using Marlin FP4 MoE backend "
+                "(CUTLASS/TRT-LLM both incompatible with SM121)"
             )
-            self.use_flashinfer_trtllm = True
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -253,9 +251,11 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
             (w2_input_global_scale), requires_grad=False
         )
 
-        # TensorRT-LLM specific processing
-        if self.use_flashinfer_trtllm:
-            # Prepare static weights for TRT-LLM kernel
+        # Choose backend weight processing
+        if self.use_marlin:
+            self._process_weights_marlin(layer)
+        elif self.use_flashinfer_trtllm:
+            # TensorRT-LLM specific processing
             (
                 gemm1_weights_fp4_shuffled,
                 gemm1_scales_fp4_shuffled,
@@ -277,27 +277,13 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
             replace_parameter(layer, "w13_weight_scale", gemm1_scales_fp4_shuffled)
             replace_parameter(layer, "w2_weight_scale", gemm2_scales_fp4_shuffled)
 
-            # SM121 (GB10) workaround: clone TRT-LLM MoE weight tensors to get fresh
-            # CUDA unified memory addresses. Same fix as vLLM compressed_tensors_moe.py.
-            if (torch.cuda.is_available()
-                    and torch.cuda.get_device_capability() == (12, 1)):
-                logger.warning("GB10 workaround: cloning TRT-LLM MoE weight tensors")
-                layer.gemm1_weights_fp4_shuffled = torch.nn.Parameter(
-                    layer.gemm1_weights_fp4_shuffled.data.clone(), requires_grad=False)
-                layer.gemm1_scales_fp4_shuffled = torch.nn.Parameter(
-                    layer.gemm1_scales_fp4_shuffled.data.clone(), requires_grad=False)
-                layer.gemm2_weights_fp4_shuffled = torch.nn.Parameter(
-                    layer.gemm2_weights_fp4_shuffled.data.clone(), requires_grad=False)
-                layer.gemm2_scales_fp4_shuffled = torch.nn.Parameter(
-                    layer.gemm2_scales_fp4_shuffled.data.clone(), requires_grad=False)
-
             # Additional parameter needed for TRT-LLM
             layer.g1_scale_c = torch.nn.Parameter(
                 (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
                 requires_grad=False,
             )
         else:
-            # swizzle weight scales
+            # CUTLASS path: swizzle weight scales
             layer.w13_weight_scale = torch.nn.Parameter(
                 swizzle_blockscale(layer.w13_weight_scale), requires_grad=False
             )
@@ -320,6 +306,215 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         self.moe_runner_config = moe_runner_config
         self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
 
+    def _process_weights_marlin(self, layer: torch.nn.Module) -> None:
+        """Repack NVFP4 MoE weights into Marlin layout for SM121 (GB10).
+
+        Weight formats:
+          w13_weight: (E, 2*N, K//2) uint8  — gate+up projections, FP4 packed 2/byte
+          w2_weight:  (E, K,   N//2) uint8  — down projection, FP4 packed 2/byte
+          w13_weight_scale: (E, 2*N, K//16) float8_e4m3fn  — per-group block scales
+          w2_weight_scale:  (E, K,   N//16) float8_e4m3fn
+          w13_weight_global_scale: (E, 2) float32  — one per expert per projection
+          w2_weight_global_scale:  (E,)   float32
+
+        Marlin kernel needs:
+          b_q_weight: Marlin-repacked (E, K//8, 2*N) int32  [for w13]
+          b_scales:   marlin_permute_scales applied (E, K//16, 2*N) float8_e4m3fn
+          global_scale: (E,) bfloat16
+        """
+        from sglang.jit_kernel.gptq_marlin_repack import gptq_marlin_repack
+        from sglang.srt.layers.quantization.marlin_utils import marlin_moe_permute_scales
+
+        E = layer.w13_weight.shape[0]
+        # hidden_size K: each uint8 byte holds 2 FP4 values → K = shape[-1]*2
+        K = layer.w13_weight.shape[2] * 2
+        # intermediate_size N: w13 is gate+up so shape[-2] = 2*N
+        N = layer.w13_weight.shape[1] // 2
+        device = layer.w13_weight.device
+        perm = torch.empty(0, dtype=torch.int, device=device)
+
+        # Repack w13 (gate+up): (E, 2*N, K//2) uint8 → Marlin int32 layout
+        #   view uint8 as int32: (2*N, K//8), transpose: (K//8, 2*N)
+        w13_list = []
+        for i in range(E):
+            qw = layer.w13_weight[i].view(torch.int32).T.contiguous()
+            w13_list.append(gptq_marlin_repack(qw, perm, K, 2 * N, 4))
+        layer.w13_weight_marlin = torch.nn.Parameter(
+            torch.stack(w13_list), requires_grad=False
+        )
+        del layer.w13_weight
+
+        # Repack w2 (down): (E, K, N//2) uint8 → Marlin int32 layout
+        #   For w2: GEMM contracts over N (intermediate), produces K (hidden)
+        #   size_k=N, size_n=K
+        #   view uint8 as int32: (K, N//8), transpose: (N//8, K)
+        w2_list = []
+        for i in range(E):
+            qw = layer.w2_weight[i].view(torch.int32).T.contiguous()
+            w2_list.append(gptq_marlin_repack(qw, perm, N, K, 4))
+        layer.w2_weight_marlin = torch.nn.Parameter(
+            torch.stack(w2_list), requires_grad=False
+        )
+        del layer.w2_weight
+
+        # Permute scales to Marlin layout (preserves dtype = float8_e4m3fn)
+        # w13_weight_scale: (E, 2*N, K//16) → transpose to (E, K//16, 2*N)
+        w13_scale_t = layer.w13_weight_scale.permute(0, 2, 1).contiguous()
+        layer.w13_scale_marlin = torch.nn.Parameter(
+            marlin_moe_permute_scales(w13_scale_t, K, 2 * N, self.group_size),
+            requires_grad=False,
+        )
+        del layer.w13_weight_scale
+
+        # w2_weight_scale: (E, K, N//16) → transpose to (E, N//16, K)
+        w2_scale_t = layer.w2_weight_scale.permute(0, 2, 1).contiguous()
+        layer.w2_scale_marlin = torch.nn.Parameter(
+            marlin_moe_permute_scales(w2_scale_t, N, K, self.group_size),
+            requires_grad=False,
+        )
+        del layer.w2_weight_scale
+
+        # Store ORIGINAL global scales (not inverted) for Marlin kernel
+        # The checkpoint stores the actual scale; w*_weight_scale_2 is 1/global_scale
+        # Convert to bfloat16 to match activation dtype
+        layer.w13_global_scale_marlin = torch.nn.Parameter(
+            layer.w13_weight_global_scale[:, 0].to(torch.bfloat16),
+            requires_grad=False,
+        )
+        layer.w2_global_scale_marlin = torch.nn.Parameter(
+            layer.w2_weight_global_scale.to(torch.bfloat16),
+            requires_grad=False,
+        )
+
+        # Pre-allocate Marlin workspace (bounded by sms * 4)
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        layer.workspace_marlin = torch.zeros(
+            sms * 4, dtype=torch.int, device=device, requires_grad=False
+        )
+
+    def _apply_weights_marlin(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output,
+    ):
+        """NVFP4 MoE forward pass using Marlin FP4 GEMM (SM121 / GB10).
+
+        Follows fused_marlin_moe pattern:
+          GEMM1: hidden (M,K) × w13 (E,2N,K) → gate+up (M*topk, 2N)
+          SiLU+Mul: gate+up → intermediate (M*topk, N)
+          GEMM2: intermediate (M*topk,N) × w2 (E,K,N) → output (M*topk, K)
+          Reduce: (M*topk,K) → (M,K)
+        """
+        from sglang.jit_kernel.moe_wna16_marlin import moe_wna16_marlin_gemm
+        from sglang.srt.layers.moe.fused_moe_triton import moe_align_block_size
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
+        from sgl_kernel import moe_sum_reduce, silu_and_mul
+        from sgl_kernel.scalar_type import scalar_types
+
+        x = dispatch_output.hidden_states
+        topk_output = dispatch_output.topk_output
+        topk_weights = topk_output.topk_weights
+        topk_ids = topk_output.topk_ids
+
+        M, K = x.shape
+        E = layer.w13_weight_marlin.shape[0]
+        # N: Marlin-repacked w2 has shape (E, N//8, K) in int32 units
+        # w2_weight_marlin[e] came from gptq_marlin_repack(qw, perm, N, K, 4)
+        # so its shape[1] = ceil_div(N, 8); N = w2_scale_marlin.shape[1] * group_size
+        N = layer.w2_scale_marlin.shape[1] * self.group_size  # intermediate_size
+        topk = topk_ids.shape[1]
+
+        # Block size selection (mirrors fused_marlin_moe)
+        block_size_m = 8
+        for bsm in [8, 16, 32, 48, 64]:
+            if M * topk / E / bsm < 0.9:
+                break
+            block_size_m = bsm
+
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids, block_size_m, E
+        )
+
+        use_atomic_add = (
+            x.dtype == torch.half
+            or torch.cuda.get_device_capability(x.device)[0] >= 9
+        )
+
+        # GEMM 1: x (M, K)  ×  w13 (E, 2*N, K)  →  intermediate1 (M*topk, 2*N)
+        intermediate1 = torch.empty(
+            (M * topk, 2 * N), dtype=x.dtype, device=x.device
+        )
+        moe_wna16_marlin_gemm(
+            a=x,
+            c_or_none=intermediate1,
+            b_q_weight=layer.w13_weight_marlin,
+            b_bias_or_none=None,
+            b_scales=layer.w13_scale_marlin,
+            global_scale_or_none=layer.w13_global_scale_marlin,
+            b_zeros_or_none=None,
+            g_idx_or_none=None,
+            perm_or_none=None,
+            workspace=layer.workspace_marlin,
+            sorted_token_ids=sorted_token_ids,
+            expert_ids=expert_ids,
+            num_tokens_post_padded=num_tokens_post_padded,
+            topk_weights=topk_weights,
+            moe_block_size=block_size_m,
+            top_k=topk,
+            mul_topk_weights=False,
+            is_ep=False,
+            b_q_type=scalar_types.float4_e2m1f,
+            size_m=M,
+            size_n=2 * N,
+            size_k=K,
+            use_atomic_add=use_atomic_add,
+            use_fp32_reduce=True,
+        )
+
+        # SiLU + gate-mul: (M*topk, 2*N) → (M*topk, N)
+        intermediate2 = torch.empty(
+            (M * topk, N), dtype=x.dtype, device=x.device
+        )
+        silu_and_mul(intermediate1, intermediate2)
+
+        # GEMM 2: intermediate2 (M*topk, N)  ×  w2 (E, K, N)  →  output (M*topk, K)
+        output = torch.zeros(
+            (M * topk, K), dtype=x.dtype, device=x.device
+        )
+        moe_wna16_marlin_gemm(
+            a=intermediate2,
+            c_or_none=output,
+            b_q_weight=layer.w2_weight_marlin,
+            b_bias_or_none=None,
+            b_scales=layer.w2_scale_marlin,
+            global_scale_or_none=layer.w2_global_scale_marlin,
+            b_zeros_or_none=None,
+            g_idx_or_none=None,
+            perm_or_none=None,
+            workspace=layer.workspace_marlin,
+            sorted_token_ids=sorted_token_ids,
+            expert_ids=expert_ids,
+            num_tokens_post_padded=num_tokens_post_padded,
+            topk_weights=topk_weights,
+            moe_block_size=block_size_m,
+            top_k=1,
+            mul_topk_weights=True,
+            is_ep=False,
+            b_q_type=scalar_types.float4_e2m1f,
+            size_m=M,
+            size_n=K,
+            size_k=N,
+            use_atomic_add=use_atomic_add,
+            use_fp32_reduce=True,
+        )
+
+        # Reduce topk expert outputs: (M*topk, K) → (M, K)
+        final_output = torch.empty((M, K), dtype=x.dtype, device=x.device)
+        moe_sum_reduce(output.view(M, topk, K), final_output)
+
+        return StandardCombineInput(hidden_states=final_output)
+
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -331,7 +526,9 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
 
-        if self.use_flashinfer_trtllm:
+        if self.use_marlin:
+            return self._apply_weights_marlin(layer, dispatch_output)
+        elif self.use_flashinfer_trtllm:
             from flashinfer import fp4_quantize, trtllm_fp4_block_scale_moe
 
             router_logits = topk_output.router_logits
