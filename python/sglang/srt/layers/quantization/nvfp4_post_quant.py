@@ -19,6 +19,76 @@ from sglang.srt.utils.common import is_sm120_supported
 logger = logging.getLogger(__name__)
 
 
+def _is_sm121() -> bool:
+    """Check if running on SM121 (GB10)."""
+    cc = torch.cuda.get_device_capability()
+    return cc[0] == 12 and cc[1] == 1
+
+
+# FP4 E2M1 lookup table: maps 4-bit values (0-15) to float
+# Bits: SEEM (sign, 2-bit exponent, 1-bit mantissa)
+_FP4_E2M1_LUT = [
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,  # positive
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,  # negative
+]
+_FP4_MAX = 6.0
+_FP8_E4M3_MAX = 448.0
+
+
+def _quantize_bf16_to_raw_nvfp4(
+    weight: torch.Tensor,
+    group_size: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize BF16 weight to raw NVFP4 packed format (checkpoint-compatible).
+
+    Produces the exact same format as compressed-tensors NVFP4 checkpoints:
+    - weight_packed: [N, K/2] uint8 (two FP4 nibbles per byte)
+    - weight_scale: [N, K/group_size] float8_e4m3fn (per-group scales)
+    - weight_global_scale: float32 scalar
+
+    This avoids sgl_fp4_quantize which produces CUTLASS-specific swizzled format.
+    """
+    device = weight.device
+    N, K = weight.shape
+
+    # Compute global scale: global_scale = FP4_MAX * FP8_MAX / amax
+    amax = weight.abs().max()
+    if amax > 0:
+        global_scale = torch.tensor(
+            _FP4_MAX * _FP8_E4M3_MAX / amax.item(),
+            dtype=torch.float32, device=device,
+        )
+    else:
+        global_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    # Scale weight by global scale and reshape to groups
+    scaled = (weight.float() * global_scale.float()).reshape(N, K // group_size, group_size)
+
+    # Compute per-group scales: scale = group_amax / FP4_MAX
+    group_amax = scaled.abs().amax(dim=-1)  # [N, K/gs]
+    per_group_scale = (group_amax / _FP4_MAX).clamp(min=1e-12)
+    per_group_scale_fp8 = per_group_scale.to(torch.float8_e4m3fn)
+
+    # Normalize each group by its scale
+    scale_expanded = per_group_scale_fp8.float().unsqueeze(-1)  # [N, K/gs, 1]
+    normalized = scaled / scale_expanded  # [N, K/gs, gs]
+
+    # Build reverse LUT: float -> 4-bit code (nearest neighbor)
+    lut_tensor = torch.tensor(_FP4_E2M1_LUT, dtype=torch.float32, device=device)
+    # normalized is in [-6, 6], find nearest FP4 value
+    flat = normalized.reshape(-1, 1)  # [N*K/gs*gs, 1]
+    dists = (flat - lut_tensor.unsqueeze(0)).abs()  # [N*K/gs*gs, 16]
+    codes = dists.argmin(dim=-1).to(torch.uint8)  # [N*K/gs*gs]
+    codes = codes.reshape(N, K)
+
+    # Pack pairs of FP4 codes into uint8: low_nibble | (high_nibble << 4)
+    even = codes[:, 0::2]  # low nibble
+    odd = codes[:, 1::2]  # high nibble
+    packed = even | (odd << 4)  # [N, K/2] uint8
+
+    return packed, per_group_scale_fp8, global_scale
+
+
 def _try_import_fp4():
     """Import FP4 quantize and GEMM functions. Returns (fp4_quantize, fp4_gemm) or raises."""
     from sglang.srt.layers.quantization.modelopt_quant import (
@@ -77,6 +147,143 @@ class Fp4PostQuantLinearMethod:
         pass
 
 
+class MarlinFp4PostQuantLinearMethod:
+    """Inference adapter for post-quantized layers using Marlin FP4 dense GEMM (SM121)."""
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from sglang.jit_kernel.gptq_marlin import gptq_marlin_gemm
+        from sglang.srt.layers.quantization.marlin_utils import (
+            should_use_atomic_add_reduce,
+        )
+        from sgl_kernel.scalar_type import scalar_types
+
+        reshaped_x = x.reshape(-1, x.shape[-1])
+        size_m = reshaped_x.shape[0]
+        size_n = layer.marlin_size_n
+        size_k = layer.marlin_size_k
+
+        use_atomic_add = should_use_atomic_add_reduce(
+            m=size_m, n=size_n, k=size_k, device=x.device, dtype=x.dtype,
+        )
+
+        device = x.device
+        empty_int = torch.empty(0, dtype=torch.int, device=device)
+
+        out = gptq_marlin_gemm(
+            a=reshaped_x,
+            c=None,
+            b_q_weight=layer.marlin_qweight,
+            b_scales=layer.marlin_scales,
+            global_scale=layer.marlin_global_scale,
+            b_zeros=empty_int,
+            g_idx=empty_int,
+            perm=empty_int,
+            workspace=layer.marlin_workspace,
+            b_q_type=scalar_types.float4_e2m1f,
+            size_m=size_m,
+            size_n=size_n,
+            size_k=size_k,
+            is_k_full=True,
+            use_atomic_add=use_atomic_add,
+            use_fp32_reduce=True,
+        )
+
+        out = out.reshape(x.shape[:-1] + (size_n,))
+        if bias is not None:
+            out = out + bias
+        return out
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
+
+def _convert_to_marlin_fp4(
+    layer: torch.nn.Module,
+    layer_name: str,
+    weight_packed: torch.Tensor,
+    weight_blockscale: torch.Tensor,
+    weight_global_scale: torch.Tensor,
+    N: int,
+    K: int,
+    device: torch.device,
+) -> bool:
+    """Convert post-quantized NVFP4 weights to Marlin FP4 format for SM121."""
+    from sglang.jit_kernel.gptq_marlin_repack import gptq_marlin_repack
+    from sglang.srt.layers.quantization.marlin_utils import (
+        marlin_make_workspace,
+        marlin_permute_scales,
+        nvfp4_marlin_interleave_scales,
+        nvfp4_marlin_process_global_scale,
+        nvfp4_marlin_process_scales,
+    )
+
+    GROUP_SIZE = 16
+
+    # Alignment check
+    if N % 64 != 0 or K % 128 != 0:
+        logger.warning(
+            f"SM121: Marlin FP4 requires N%64==0, K%128==0 but got "
+            f"N={N}, K={K} for {layer_name}. Skipping post-quant."
+        )
+        return False
+
+    # Repack weights: [N, K/2] uint8 -> Marlin tile layout
+    perm = torch.empty(0, dtype=torch.int, device=device)
+    qw_int32 = weight_packed.view(torch.int32).T.contiguous()
+    marlin_qw = gptq_marlin_repack(qw_int32, perm, K, N, 4)
+    del weight_packed, qw_int32  # Free original packed weights
+
+    # Transform scales: [N, K/16] fp8 -> Marlin S0E5M3 + interleaved
+    scale_bf16 = weight_blockscale.to(torch.bfloat16)
+    del weight_blockscale  # Free original fp8 scales
+    scale_t = scale_bf16.T.contiguous()  # [K/16, N]
+    del scale_bf16
+    scale_permuted = marlin_permute_scales(scale_t, K, N, GROUP_SIZE)
+    del scale_t
+    marlin_scales = nvfp4_marlin_process_scales(scale_permuted)
+    del scale_permuted
+    marlin_scales = nvfp4_marlin_interleave_scales(marlin_scales, K, N, GROUP_SIZE)
+
+    # Process global scale: invert + exponent bias correction
+    inv_gs = (1.0 / weight_global_scale).to(torch.bfloat16)
+    marlin_gs = nvfp4_marlin_process_global_scale(inv_gs)
+
+    # Workspace
+    workspace = marlin_make_workspace(device)
+
+    # Remove old weight and register Marlin parameters
+    if hasattr(layer, "weight"):
+        delattr(layer, "weight")
+
+    layer.register_parameter(
+        "marlin_qweight", Parameter(marlin_qw, requires_grad=False)
+    )
+    layer.register_parameter(
+        "marlin_scales", Parameter(marlin_scales, requires_grad=False)
+    )
+    layer.register_parameter(
+        "marlin_global_scale",
+        Parameter(marlin_gs.unsqueeze(0), requires_grad=False),
+    )
+    layer.marlin_workspace = workspace
+    layer.marlin_size_n = N
+    layer.marlin_size_k = K
+
+    # Swap quant method to Marlin
+    layer.quant_method = MarlinFp4PostQuantLinearMethod()
+
+    logger.info(
+        f"Post-quantized {layer_name} from BF16 to NVFP4 (Marlin FP4) "
+        f"(shape [{N}, {K}], global_scale={weight_global_scale.item():.4f})"
+    )
+    return True
+
+
 def quantize_linear_bf16_to_nvfp4(layer: torch.nn.Module, layer_name: str) -> bool:
     """Quantize a single BF16 linear layer to NVFP4 in-place.
 
@@ -85,14 +292,6 @@ def quantize_linear_bf16_to_nvfp4(layer: torch.nn.Module, layer_name: str) -> bo
 
     Returns True if successful, False if skipped.
     """
-    try:
-        fp4_quantize, _, enable_flashinfer_fp4_gemm = _try_import_fp4()
-    except ImportError:
-        logger.warning(
-            f"Cannot post-quantize {layer_name}: fp4_quantize not available"
-        )
-        return False
-
     if not hasattr(layer, "weight"):
         logger.warning(f"Skipping {layer_name}: no weight attribute")
         return False
@@ -104,6 +303,29 @@ def quantize_linear_bf16_to_nvfp4(layer: torch.nn.Module, layer_name: str) -> bo
 
     device = weight.device
     N, K = weight.shape
+
+    # SM121 (GB10): CUTLASS FP4 is broken. Quantize to raw NVFP4 format
+    # (checkpoint-compatible) and use Marlin FP4 dense GEMM instead.
+    if _is_sm121():
+        weight_packed, weight_blockscale, weight_global_scale = (
+            _quantize_bf16_to_raw_nvfp4(weight, group_size=16)
+        )
+        del weight
+        if hasattr(layer, "weight"):
+            delattr(layer, "weight")
+        return _convert_to_marlin_fp4(
+            layer, layer_name, weight_packed, weight_blockscale,
+            weight_global_scale, N, K, device,
+        )
+
+    # Non-SM121 path: use CUTLASS-compatible quantization
+    try:
+        fp4_quantize, _, enable_flashinfer_fp4_gemm = _try_import_fp4()
+    except ImportError:
+        logger.warning(
+            f"Cannot post-quantize {layer_name}: fp4_quantize not available"
+        )
+        return False
 
     # Quantize the weight to FP4
     # fp4_quantize expects [rows, cols] and returns (packed_uint8, blockscale)
@@ -212,14 +434,16 @@ def apply_nvfp4_post_quant(
     if not is_sm120_supported():
         return 0
 
-    try:
-        _try_import_fp4()
-    except ImportError:
-        logger.warning(
-            "NVFP4 post-quantization skipped: fp4_quantize not available. "
-            "Install flashinfer or sgl-kernel with FP4 support."
-        )
-        return 0
+    # SM121 uses pure-Python quantization + Marlin FP4, no fp4_quantize needed
+    if not _is_sm121():
+        try:
+            _try_import_fp4()
+        except ImportError:
+            logger.warning(
+                "NVFP4 post-quantization skipped: fp4_quantize not available. "
+                "Install flashinfer or sgl-kernel with FP4 support."
+            )
+            return 0
 
     converted = 0
     for name, module in model.named_modules():
