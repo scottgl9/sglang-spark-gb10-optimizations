@@ -306,6 +306,62 @@ def _clear_moe_jit_cache() -> None:
                 logger.debug("GB10 compat: cleared JIT cache %s", path)
 
 
+def _patch_gdn_prefill_launcher(data_dir: str) -> None:
+    """Allow SM12x in FlashInfer GDN prefill launcher.
+
+    The gdn_prefill_launcher.cu source checks `device_major == 9` and
+    rejects SM12x (Blackwell).  SM121 is binary-compatible with sm_90a
+    kernels, so we allow device_major 12 as well.
+
+    Patches both the installed package source (data_dir) and any already-
+    generated copies in the JIT cache.
+    """
+    import glob as globmod
+
+    old = "if (device_major == 9) {"
+    new = "if (device_major == 9 || device_major == 12) { /* GB10 patched */"
+
+    # 1. Patch installed package source template
+    pkg_src = os.path.join(data_dir, "csrc", "gdn_prefill_launcher.cu")
+    for target in [pkg_src]:
+        if not os.path.exists(target):
+            continue
+        with open(target) as f:
+            content = f.read()
+        if old in content:
+            content = content.replace(old, new)
+            with open(target, "w") as f:
+                f.write(content)
+            logger.debug("GB10 compat: patched GDN prefill source %s", target)
+
+    # 2. Patch any already-generated copies in the JIT cache
+    cache_dir = os.path.expanduser("~/.cache/flashinfer")
+    if not os.path.exists(cache_dir):
+        return
+
+    launchers = globmod.glob(
+        os.path.join(cache_dir, "**", "gdn_prefill_launcher.cu"), recursive=True
+    )
+    for target in launchers:
+        with open(target) as f:
+            content = f.read()
+        if old not in content:
+            continue
+
+        content = content.replace(old, new)
+        with open(target, "w") as f:
+            f.write(content)
+
+        # Remove cached .so and launcher .o to force recompilation
+        cached_dir = os.path.dirname(target).replace("/generated/", "/cached_ops/")
+        for ext in ("*.so", "gdn_prefill_launcher.cuda.o"):
+            for p in globmod.glob(os.path.join(cached_dir, ext)):
+                os.remove(p)
+                logger.debug("GB10 compat: removed cached %s", p)
+
+        logger.debug("GB10 compat: patched GDN prefill launcher %s", target)
+
+
 @cache
 def ensure_flashinfer_sm121_compat() -> None:
     """Apply all SM121 FlashInfer header patches (idempotent, runs once).
@@ -329,5 +385,6 @@ def ensure_flashinfer_sm121_compat() -> None:
     _copy_fp4_header(data_dir)
     _patch_trtllm_fused_moe_runtime_checks(data_dir)
     _patch_trtllm_fused_moe_jit()
+    _patch_gdn_prefill_launcher(data_dir)
     _clear_moe_jit_cache()
     logger.info("GB10 compat: FlashInfer patches complete")

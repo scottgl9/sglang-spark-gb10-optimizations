@@ -2676,20 +2676,39 @@ class ServerArgs:
                     sm100_default_attention_backend=sm100_default_attn_backend,
                 )
 
-                # SM12.x: auto-select flashinfer for GatedDeltaNet linear attention.
-                # FlashInfer GDN CUTLASS kernels require SM90+ (capability[0] >= 9)
-                # which includes SM120. The Triton fallback lacks pipelining for
-                # the recurrent SSM state update, making flashinfer faster on Blackwell.
+                # SM12.x: auto-select flashinfer for GatedDeltaNet linear attention
+                # ONLY if the device has enough shared memory (>=228 KB optin).
+                # FlashInfer GDN CUTLASS kernels are compiled for SM90a and use
+                # large shared memory tiles.  Full Blackwell (B200/B100) has
+                # 228 KB, but GB10 has only ~99 KB, so the kernel's
+                # cudaFuncSetAttribute call fails ("initialize failed").
                 if (
                     is_sm120_supported()
                     and is_flashinfer_available()
                     and self.linear_attn_backend == "triton"
                 ):
-                    self.linear_attn_backend = "flashinfer"
-                    logger.info(
-                        "Auto-selected flashinfer linear attention backend for SM120 "
-                        f"({model_arch}): FlashInfer GDN CUTLASS kernels support SM90+."
+                    import ctypes
+
+                    _librt = ctypes.cdll.LoadLibrary("libcudart.so")
+                    _smem = ctypes.c_int()
+                    # cudaDevAttrMaxSharedMemoryPerBlockOptin = 97
+                    _librt.cudaDeviceGetAttribute(
+                        ctypes.byref(_smem), 97, 0
                     )
+                    if _smem.value >= 228 * 1024:
+                        self.linear_attn_backend = "flashinfer"
+                        logger.info(
+                            "Auto-selected flashinfer linear attention backend "
+                            f"for SM120 ({model_arch}): shared_mem_optin="
+                            f"{_smem.value} bytes."
+                        )
+                    else:
+                        logger.info(
+                            "Keeping triton linear attention backend for SM120 "
+                            f"({model_arch}): shared_mem_optin={_smem.value} "
+                            "bytes (< 228 KB required by FlashInfer GDN "
+                            "CUTLASS kernels)."
+                        )
 
         elif model_arch == "MiniCPMV4_6ForConditionalGeneration":
             # 4.6 wraps a Qwen3.5 hybrid GDN backbone, so it needs the same
@@ -4823,11 +4842,19 @@ class ServerArgs:
             action="store_true",
             help="Skip the physical KV cache allocation for embedding-mode prefill-only workloads. Currently only valid with --is-embedding, --chunked-prefill-size=-1, --disable-radix-cache, an FA prefill backend, and non-FP4 KV cache so the fa_skip_kv_cache path is active (no layer reads or writes the cache). Other prefill-only workloads such as scoring/MIS may benefit from this later once their attention paths stop using paged KV. Scheduler admission accounting is unchanged; per-layer K/V tensors are sized to (page_size, head_num, head_dim) placeholders so GPU memory is not wasted.",
         )
-        parser.add_argument(
+        mm_group = parser.add_mutually_exclusive_group()
+        mm_group.add_argument(
             "--enable-multimodal",
+            dest="enable_multimodal",
             default=ServerArgs.enable_multimodal,
             action="store_true",
             help="Enable the multimodal functionality for the served model. If the model being served is not multimodal, nothing will happen",
+        )
+        mm_group.add_argument(
+            "--disable-multimodal",
+            dest="enable_multimodal",
+            action="store_false",
+            help="Disable multimodal: skip loading the visual encoder to save memory. Text-only serving.",
         )
         parser.add_argument(
             "--revision",
