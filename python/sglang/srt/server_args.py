@@ -2077,6 +2077,19 @@ class ServerArgs:
                         "Use flashinfer_trtllm as MoE runner backend on sm100 for "
                         f"{model_arch}"
                     )
+            elif is_sm120_supported() and self.quantization == "compressed-tensors":
+                # SM121 (GB10/Spark) CUTLASS FP4 MoE produces all-zero output,
+                # same as vLLM issue fixed by using TRT-LLM backend.
+                # Force flashinfer_trtllm for SM120/SM121 with compressed-tensors NVFP4.
+                if (
+                    self.moe_a2a_backend == "none"
+                    and self.moe_runner_backend == "auto"
+                ):
+                    self.moe_runner_backend = "flashinfer_trtllm"
+                    logger.warning(
+                        "SM120/SM121 detected with compressed-tensors NVFP4: "
+                        "forcing flashinfer_trtllm MoE backend (CUTLASS FP4 MoE broken on SM121)"
+                    )
 
             if model_arch in [
                 "Qwen3NextForCausalLM",
