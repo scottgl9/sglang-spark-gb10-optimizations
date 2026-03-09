@@ -1955,7 +1955,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     weight_loader(param_lm_head, loaded_weight)
             loaded_params.add(name)
 
-        # Post-quantize large BF16 GDN layers to NVFP4 on SM120
+        # Post-quantize large BF16 GDN layers to NVFP4 on SM120/SM121
+        # SM121 uses Marlin FP4 dense GEMM (CUTLASS broken on GB10)
         if is_sm120_supported():
             from sglang.srt.layers.quantization.nvfp4_post_quant import (
                 apply_nvfp4_post_quant,
@@ -2359,7 +2360,8 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             }
         )
 
-        # Post-quantize large BF16 GDN layers to NVFP4 on SM120
+        # Post-quantize large BF16 GDN layers to NVFP4 on SM120/SM121
+        # SM121 uses Marlin FP4 dense GEMM (CUTLASS broken on GB10)
         if is_sm120_supported():
             from sglang.srt.layers.quantization.nvfp4_post_quant import (
                 apply_nvfp4_post_quant,
