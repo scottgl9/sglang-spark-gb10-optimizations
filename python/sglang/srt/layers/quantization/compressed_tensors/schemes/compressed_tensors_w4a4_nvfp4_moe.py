@@ -47,6 +47,20 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         self.group_size = 16
         self.use_flashinfer_trtllm = get_moe_runner_backend().is_flashinfer_trtllm()
 
+        # SM121 (GB10/Spark) workaround: CUTLASS FP4 MoE produces all-zero output on
+        # SM121, causing NaN softmax and garbage token generation (repeated "!" tokens).
+        # Confirmed same bug as vLLM fix "restore Marlin MoE override for SM121".
+        # Force TRT-LLM FP4 MoE backend which uses NVIDIA kernel and is correct on SM121.
+        import torch as _torch
+        if (not self.use_flashinfer_trtllm
+                and _torch.cuda.is_available()
+                and _torch.cuda.get_device_capability() == (12, 1)):
+            logger.warning(
+                "SM121 (GB10) detected: CUTLASS FP4 MoE produces all-zero output. "
+                "Forcing flashinfer TRT-LLM FP4 MoE backend."
+            )
+            self.use_flashinfer_trtllm = True
+
     @classmethod
     def get_min_capability(cls) -> int:
         # Requires sm100(blackwell) architecture
@@ -269,6 +283,20 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
             layer.gemm2_scales_fp4_shuffled = torch.nn.Parameter(
                 gemm2_scales_fp4_shuffled, requires_grad=False
             )
+
+            # SM121 (GB10) workaround: clone TRT-LLM MoE weight tensors to get fresh
+            # CUDA unified memory addresses. Same fix as vLLM compressed_tensors_moe.py.
+            if (torch.cuda.is_available()
+                    and torch.cuda.get_device_capability() == (12, 1)):
+                logger.warning("GB10 workaround: cloning TRT-LLM MoE weight tensors")
+                layer.gemm1_weights_fp4_shuffled = torch.nn.Parameter(
+                    layer.gemm1_weights_fp4_shuffled.data.clone(), requires_grad=False)
+                layer.gemm1_scales_fp4_shuffled = torch.nn.Parameter(
+                    layer.gemm1_scales_fp4_shuffled.data.clone(), requires_grad=False)
+                layer.gemm2_weights_fp4_shuffled = torch.nn.Parameter(
+                    layer.gemm2_weights_fp4_shuffled.data.clone(), requires_grad=False)
+                layer.gemm2_scales_fp4_shuffled = torch.nn.Parameter(
+                    layer.gemm2_scales_fp4_shuffled.data.clone(), requires_grad=False)
 
             # Additional parameter needed for TRT-LLM
             layer.g1_scale_c = torch.nn.Parameter(
