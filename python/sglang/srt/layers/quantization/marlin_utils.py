@@ -359,6 +359,37 @@ def nvfp4_marlin_process_scales(marlin_scales: torch.Tensor) -> torch.Tensor:
     return marlin_scales
 
 
+def nvfp4_marlin_interleave_scales(
+    marlin_scales: torch.Tensor, size_k: int, size_n: int, group_size: int
+) -> torch.Tensor:
+    """Byte-interleave adjacent K-group scale rows for Marlin FP4 kernel.
+
+    The Marlin FP4 kernel reads scale pairs with s_gl_stride = 2 * fp8_row_width,
+    loading two adjacent K-group rows per tile. Within shared memory, warp_row % 2
+    selects even (8B) or odd (8B) chunks from each int4 load. This function
+    interleaves adjacent scale rows in 8-byte chunks so each K-group gets its
+    own correct scale instead of sharing with its neighbor.
+
+    Args:
+        marlin_scales: [K/group_size, N] fp8 output from nvfp4_marlin_process_scales
+        size_k: K dimension
+        size_n: N dimension
+        group_size: quantization group size (typically 16)
+    Returns:
+        [K/group_size, N] fp8 with byte-interleaved row pairs
+    """
+    n_groups = size_k // group_size
+    n_pairs = n_groups // 2
+    ms_bytes = marlin_scales.view(torch.uint8)  # [K/gs, N] uint8
+    ms_pairs = ms_bytes.reshape(n_pairs, 2, size_n // 8, 8)
+    ms_interleaved = ms_pairs.permute(0, 2, 1, 3).reshape(n_pairs, 2 * size_n)
+    return (
+        ms_interleaved.reshape(n_groups, size_n)
+        .view(torch.float8_e4m3fn)
+        .contiguous()
+    )
+
+
 def nvfp4_marlin_process_global_scale(global_scale: torch.Tensor) -> torch.Tensor:
     """Apply exponent bias correction to global scale for Marlin NVFP4."""
     assert global_scale.dtype in [torch.half, torch.bfloat16]

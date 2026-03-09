@@ -338,6 +338,7 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         from sglang.jit_kernel.gptq_marlin_repack import gptq_marlin_repack
         from sglang.srt.layers.quantization.marlin_utils import (
             marlin_moe_permute_scales,
+            nvfp4_marlin_interleave_scales,
             nvfp4_marlin_process_global_scale,
             nvfp4_marlin_process_scales,
         )
@@ -378,7 +379,13 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         # w13_weight_scale: (E, 2*N, K//16) → convert to params_dtype, transpose, permute, encode
         w13_scale_t = layer.w13_weight_scale.to(layer.params_dtype).permute(0, 2, 1).contiguous()
         w13_scale_permuted = marlin_moe_permute_scales(w13_scale_t, K, 2 * N, self.group_size)
-        w13_scale_list = [nvfp4_marlin_process_scales(w13_scale_permuted[e]) for e in range(E)]
+        w13_scale_list = [
+            nvfp4_marlin_interleave_scales(
+                nvfp4_marlin_process_scales(w13_scale_permuted[e]),
+                K, 2 * N, self.group_size,
+            )
+            for e in range(E)
+        ]
         layer.w13_scale_marlin = torch.nn.Parameter(
             torch.stack(w13_scale_list), requires_grad=False
         )
@@ -387,7 +394,13 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         # w2_weight_scale: (E, K, N//16) → same pattern
         w2_scale_t = layer.w2_weight_scale.to(layer.params_dtype).permute(0, 2, 1).contiguous()
         w2_scale_permuted = marlin_moe_permute_scales(w2_scale_t, N, K, self.group_size)
-        w2_scale_list = [nvfp4_marlin_process_scales(w2_scale_permuted[e]) for e in range(E)]
+        w2_scale_list = [
+            nvfp4_marlin_interleave_scales(
+                nvfp4_marlin_process_scales(w2_scale_permuted[e]),
+                N, K, self.group_size,
+            )
+            for e in range(E)
+        ]
         layer.w2_scale_marlin = torch.nn.Parameter(
             torch.stack(w2_scale_list), requires_grad=False
         )
