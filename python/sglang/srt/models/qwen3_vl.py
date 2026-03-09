@@ -1077,15 +1077,19 @@ class Qwen3VLForConditionalGeneration(nn.Module):
 
         self.use_data_parallel = get_global_server_args().mm_enable_dp_encoder
 
-        self.visual = Qwen3VLMoeVisionModel(
-            config.vision_config,
-            # NOTE: Qwen3-VL vision encoder currently supports BitsAndBytes 4-bit quantization.
-            # Other quantization methods (e.g., GPTQ, AWQ) are untested and may not be supported.
-            quant_config=None,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            prefix=add_prefix("model.visual", prefix),
-            use_data_parallel=self.use_data_parallel,
-        )
+        self.language_only = getattr(config, "language_only", False)
+        if not self.language_only:
+            self.visual = Qwen3VLMoeVisionModel(
+                config.vision_config,
+                # NOTE: Qwen3-VL vision encoder currently supports BitsAndBytes 4-bit quantization.
+                # Other quantization methods (e.g., GPTQ, AWQ) are untested and may not be supported.
+                quant_config=None,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                prefix=add_prefix("model.visual", prefix),
+                use_data_parallel=self.use_data_parallel,
+            )
+        else:
+            self.visual = None
 
         # TODO: make it more elegant
         if language_model_cls is Qwen3LLMModel:
