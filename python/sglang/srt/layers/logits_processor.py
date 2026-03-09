@@ -902,6 +902,14 @@ class LogitsProcessor(nn.Module):
                 logits = torch.matmul(
                     hidden_states.bfloat16(), lm_head.weight.T.bfloat16()
                 )
+            elif lm_head.weight.dtype == torch.float8_e4m3fn and hasattr(
+                lm_head, "quant_method"
+            ):
+                # FP8-quantized lm_head — use quant_method.apply() for
+                # CUTLASS FP8 GEMM instead of naive torch.matmul
+                logits = lm_head.quant_method.apply(
+                    lm_head, hidden_states, embedding_bias
+                )
             else:
                 logits = torch.matmul(
                     hidden_states.to(lm_head.weight.dtype), lm_head.weight.T
