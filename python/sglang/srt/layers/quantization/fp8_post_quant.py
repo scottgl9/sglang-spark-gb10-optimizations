@@ -173,6 +173,116 @@ def apply_fp8_post_quant(
     return converted
 
 
+class Fp8PostQuantLinearMethod:
+    """Quant method for LinearBase modules (ColumnParallelLinear, RowParallelLinear).
+
+    Uses CUTLASS FP8 GEMM (fp8_scaled_mm) with per-channel weight scales and
+    per-token activation scales via sglang_per_token_quant_fp8.
+    """
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """No-op — weights are already FP8 from post-quantization."""
+        pass
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: "Optional[torch.Tensor]" = None,
+    ) -> torch.Tensor:
+        from sglang.srt.layers.quantization.fp8_utils import (
+            fp8_scaled_mm,
+            sglang_per_token_quant_fp8,
+        )
+
+        x_flat = x.reshape(-1, x.shape[-1])
+        qx, x_scale = sglang_per_token_quant_fp8(x_flat)
+
+        out = fp8_scaled_mm(
+            qx,
+            layer.weight,
+            x_scale,
+            layer.weight_scale,
+            out_dtype=x.dtype,
+        )
+
+        if bias is not None:
+            out = out + bias
+
+        return out.view(*x.shape[:-1], out.shape[-1])
+
+
+def apply_fp8_post_quant_linear_base(
+    model: torch.nn.Module,
+    layer_patterns: Sequence[str],
+) -> int:
+    """Convert matching BF16 LinearBase layers (ColumnParallelLinear etc.) to FP8.
+
+    Uses per-channel weight quantization (one scale per output channel) for
+    compatibility with CUTLASS FP8 GEMM (fp8_scaled_mm). Weights are stored
+    transposed [K, N] in column-major layout as required by fp8_scaled_mm.
+
+    Args:
+        model: The model to post-quantize.
+        layer_patterns: List of layer name suffixes to match.
+
+    Returns:
+        Number of layers successfully converted.
+    """
+    from sglang.srt.layers.quantization.fp8_utils import sglang_per_token_quant_fp8
+
+    converted = 0
+    fp8_method = Fp8PostQuantLinearMethod()
+
+    for name, module in model.named_modules():
+        module_short_name = name.rsplit(".", 1)[-1] if "." in name else name
+        if module_short_name not in layer_patterns:
+            continue
+        if not hasattr(module, "weight") or not hasattr(module, "quant_method"):
+            continue
+        weight = module.weight.data
+        if weight.dtype not in (torch.bfloat16, torch.float16):
+            continue
+
+        orig_shape = list(weight.shape)
+        orig_mb = weight.numel() * weight.element_size() / 1024 / 1024
+
+        # Per-channel FP8 quantization (one scale per row = per output channel)
+        # sglang_per_token_quant_fp8 treats each row as a "token" → per-row scales
+        qweight, weight_scale = sglang_per_token_quant_fp8(weight)
+        # qweight: [N, K] fp8, weight_scale: [N, 1] float32
+        # fp8_scaled_mm expects: weight=[K, N] column-major, scale=[1, N]
+        weight_t = qweight.t()  # [K, N], stride=[1, K] → column-major
+        scale_t = weight_scale.t().contiguous()  # [1, N]
+
+        fp8_mb = qweight.numel() / 1024 / 1024
+
+        # Delete BF16 weight, replace with FP8
+        del weight
+        del module.weight
+        module.weight = Parameter(weight_t, requires_grad=False)
+        module.weight_scale = Parameter(scale_t, requires_grad=False)
+        module.quant_method = fp8_method
+
+        logger.info(
+            "FP8 post-quantized (LinearBase) %s: %.2f MB -> %.2f MB, shape=%s",
+            name,
+            orig_mb,
+            fp8_mb,
+            orig_shape,
+        )
+        converted += 1
+
+    if converted > 0:
+        logger.info(
+            "FP8 post-quantization (LinearBase): converted %d layers matching %s",
+            converted,
+            layer_patterns,
+        )
+        torch.cuda.empty_cache()
+    return converted
+
+
 def quantize_mtp_moe_fp8(mtp_model: torch.nn.Module) -> int:
     """Post-quantize MTP MoE expert weights from BF16 to FP8.
 
