@@ -867,6 +867,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
 
         q, k = self._apply_qk_norm(q, k)
         q, k = self.rotary_emb(positions, q, k)
+
         attn_output = self.attn(q, k, v, forward_batch)
 
         if self.attn_output_gate:
@@ -1621,12 +1622,19 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
             loaded_params.add(name)
 
         # Post-quantize large BF16 GDN layers to NVFP4 on SM120
-        if is_sm120_supported():
+        # Skip on SM121 (GB10) — CUTLASS FP4 dense GEMM produces corrupt output
+        cc = torch.cuda.get_device_capability()
+        if is_sm120_supported() and not (cc[0] == 12 and cc[1] == 1):
             from sglang.srt.layers.quantization.nvfp4_post_quant import (
                 apply_nvfp4_post_quant,
             )
 
             apply_nvfp4_post_quant(self, layer_patterns=["in_proj_qkv", "in_proj_z"])
+        elif cc[0] == 12 and cc[1] == 1:
+            logger.warning(
+                "SM121 (GB10) detected: skipping NVFP4 post-quantization of GDN "
+                "projections (CUTLASS FP4 produces corrupt output on SM121)"
+            )
 
         return loaded_params
 
@@ -2020,12 +2028,19 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         )
 
         # Post-quantize large BF16 GDN layers to NVFP4 on SM120
-        if is_sm120_supported():
+        # Skip on SM121 (GB10) — CUTLASS FP4 dense GEMM produces corrupt output
+        cc = torch.cuda.get_device_capability()
+        if is_sm120_supported() and not (cc[0] == 12 and cc[1] == 1):
             from sglang.srt.layers.quantization.nvfp4_post_quant import (
                 apply_nvfp4_post_quant,
             )
 
             apply_nvfp4_post_quant(self, layer_patterns=["in_proj_qkv", "in_proj_z"])
+        elif cc[0] == 12 and cc[1] == 1:
+            logger.warning(
+                "SM121 (GB10) detected: skipping NVFP4 post-quantization of GDN "
+                "projections (CUTLASS FP4 produces corrupt output on SM121)"
+            )
 
         return loaded_params
 
