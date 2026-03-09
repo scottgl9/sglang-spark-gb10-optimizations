@@ -347,6 +347,30 @@ def marlin_moe_permute_scales(
     return output
 
 
+def nvfp4_marlin_process_scales(marlin_scales: torch.Tensor) -> torch.Tensor:
+    """Convert permuted FP8-S1E4M3 scales to S0E5M3 format for Marlin NVFP4."""
+    marlin_scales = marlin_scales.to(torch.half)
+    marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
+        marlin_scales.size(0), -1
+    )
+    marlin_scales = (marlin_scales * (2**7)).view(torch.int16) << 1
+    marlin_scales = marlin_scales.view(torch.float8_e4m3fn)
+    marlin_scales = marlin_scales[:, 1::2].contiguous()
+    return marlin_scales
+
+
+def nvfp4_marlin_process_global_scale(global_scale: torch.Tensor) -> torch.Tensor:
+    """Apply exponent bias correction to global scale for Marlin NVFP4."""
+    assert global_scale.dtype in [torch.half, torch.bfloat16]
+    fp4_exponent = 2
+    if global_scale.dtype == torch.half:
+        target_exponent = 5
+    elif global_scale.dtype == torch.bfloat16:
+        target_exponent = 8
+    exponent_bias = 2 ** (target_exponent - 1) - 2 ** (fp4_exponent - 1)
+    return global_scale * (2.0 ** (exponent_bias - 7))
+
+
 def marlin_zero_points(
     zp: torch.Tensor, size_k: int, size_n: int, num_bits: int
 ) -> torch.Tensor:
