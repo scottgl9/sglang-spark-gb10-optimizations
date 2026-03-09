@@ -562,7 +562,7 @@ cmd_qwen3_coder_next_nvfp4() {
     cmd_launch \
         --model-path "${model}" \
         --quantization compressed-tensors \
-        --mem-fraction-static 0.9 \
+        --mem-fraction-static 0.85 \
         --context-length "${ctx}" \
         --attention-backend triton \
         --reasoning-parser qwen3 \
