@@ -241,7 +241,13 @@ class ModelConfig:
         ) or getattr(self.hf_config, "image_token_index", None)
 
         self.hf_config.encoder_only = encoder_only
-        self.hf_config.language_only = language_only
+        # Treat --enable-multimodal false the same as --language-only for model
+        # init: skip loading the visual encoder to save memory.
+        self.hf_config.language_only = language_only or (
+            enable_multimodal is not None
+            and not enable_multimodal
+            and is_multimodal_model(self.hf_config.architectures)
+        )
 
         # matryoshka embeddings
         self.matryoshka_dimensions = getattr(
