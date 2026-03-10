@@ -51,9 +51,9 @@ PYTHON="python3.12"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-65536}"
 
 # ── KV cache dtype default ────────────────────────────────────────────────────
-# Default is fp8_e4m3 for most GPUs. On SM121 (GB10), setup_runtime_env()
-# overrides this to "auto" (BF16) since FP8 KV cache is untested on SM121.
-# User can always force a specific value: KV_CACHE_DTYPE=fp8_e4m3 ./sglang.sh ...
+# Default is fp8_e4m3 — validated on SM121 (GB10). CUTLASS FP8 works correctly
+# on SM121 and halves KV cache bandwidth vs BF16.
+# User can override: KV_CACHE_DTYPE=auto ./sglang.sh ...  (forces BF16)
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8_e4m3}"
 
 # ── Shared launch arg groups ────────────────────────────────────────────────
@@ -139,9 +139,9 @@ setup_runtime_env() {
 
     # ── SM121 (GB10) specific overrides ────────────────────────────────────
     # Detect SM121 at runtime and apply necessary workarounds:
-    #   - KV_CACHE_DTYPE=auto: FP8 KV cache untested on SM121, use BF16
+    #   - KV_CACHE_DTYPE=fp8_e4m3: CUTLASS FP8 validated on SM121 (no override needed)
     #   - SGLANG_ENABLE_JIT_DEEPGEMM=0: DeepGEMM JIT fails on SM121
-    #   - SGLANG_MTP_FP8=0: MTP FP8 post-quant untested with NVFP4 path
+    #   - SGLANG_MTP_FP8=0: Triton fp8e4nv dot not supported on SM120+
     local gpu_sm
     gpu_sm=$(python -c "
 import torch
@@ -154,11 +154,8 @@ else:
 
     if [[ "${gpu_sm}" == "12.1" ]]; then
         info "Detected SM121 (GB10) — applying workarounds"
-        # Override KV cache dtype unless user explicitly set it before invoking
-        # the script (the script default is fp8_e4m3; SM121 needs auto/BF16).
-        if [[ "${KV_CACHE_DTYPE}" == "fp8_e4m3" ]]; then
-            export KV_CACHE_DTYPE="auto"
-        fi
+        # KV cache: fp8_e4m3 is validated on SM121 (CUTLASS FP8 works, unlike FP4).
+        # The script default is already fp8_e4m3 so no override needed.
         export SGLANG_ENABLE_JIT_DEEPGEMM="${SGLANG_ENABLE_JIT_DEEPGEMM:-0}"
         # Triton fp8e4nv dot not supported on SM120+, so MTP MoE FP8 post-quant
         # is incompatible. Only override if user didn't explicitly set it.
@@ -505,7 +502,9 @@ cmd_launch() {
     info "  KV_CACHE_DTYPE                = ${KV_CACHE_DTYPE}"
     echo ""
 
-    exec python -m sglang.launch_server "$@"
+    # Pass KV_CACHE_DTYPE as --kv-cache-dtype arg (resolved after SM121 override).
+    # Presets should NOT pass --kv-cache-dtype themselves.
+    exec python -m sglang.launch_server --kv-cache-dtype "${KV_CACHE_DTYPE}" "$@"
 }
 
 cmd_qwen35_nvfp4() {
@@ -532,7 +531,6 @@ cmd_qwen35_nvfp4() {
         --model-path "${model}" \
         --quantization compressed-tensors \
         --speculative-draft-model-quantization compressed-tensors \
-        --kv-cache-dtype "${KV_CACHE_DTYPE}" \
         --mem-fraction-static 0.85 \
         --context-length "${CONTEXT_LENGTH}" \
         --max-running-requests 3 \
@@ -573,7 +571,6 @@ cmd_qwen35_35b_nvfp4() {
     cmd_launch \
         --model-path "${model}" \
         --quantization compressed-tensors \
-        --kv-cache-dtype "${KV_CACHE_DTYPE}" \
         --mem-fraction-static 0.75 \
         --context-length "${CONTEXT_LENGTH}" \
         --max-running-requests 3 \
@@ -621,7 +618,6 @@ cmd_qwen3_coder_next_fp8() {
     cmd_launch \
         --model-path "${model}" \
         --quantization fp8 \
-        --kv-cache-dtype "${KV_CACHE_DTYPE}" \
         --mem-fraction-static 0.85 \
         --max-running-requests 8 \
         --context-length "${ctx}" \
@@ -644,7 +640,6 @@ cmd_minimax() {
         --model-path "${model}" \
         --served-model-name MiniMax-M2.5 \
         --quantization modelopt_fp4 \
-        --kv-cache-dtype "${KV_CACHE_DTYPE}" \
         --mem-fraction-static 0.85 \
         --max-running-requests 8 \
         --context-length 16384 \
