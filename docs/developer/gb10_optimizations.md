@@ -262,6 +262,25 @@ The Marlin FP4 kernel is at the memory bandwidth ceiling on SM121.
 
 ---
 
+## Investigated Options (Not Applicable to SM121)
+
+### `--fp4-gemm-backend flashinfer_cudnn`
+
+Described as "optimal on CUDA 13+ with cuDNN 9.15+". GB10 has CUDA 13.0 and cuDNN 9.13.0
+(just below the threshold), but more importantly this backend routes **CUTLASS-based** FP4
+GEMM through cuDNN — which still uses CUTLASS FP4 under the hood. CUTLASS FP4 is broken on
+SM121, so this backend would produce the same corrupt output regardless.
+
+On SM121, all NVFP4 GEMMs are routed through **Marlin FP4** (`gptq_marlin_gemm`), bypassing
+`fp4_gemm_runner_backend` entirely. The `--fp4-gemm-backend` flag has no effect on SM121.
+
+### `--mm-attention-backend flashinfer_cudnn`
+
+FlashInfer cuDNN backend for multimodal (vision) attention. Not applicable — we are running
+text-only models (Qwen3.5-122B-A10B-NVFP4 has no vision encoder).
+
+---
+
 ## Launch Command (Qwen3.5-122B on GB10)
 
 ```bash
