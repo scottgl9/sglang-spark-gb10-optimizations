@@ -51,8 +51,9 @@ PYTHON="python3.12"
 CONTEXT_LENGTH="${CONTEXT_LENGTH:-65536}"
 
 # ── KV cache dtype default ────────────────────────────────────────────────────
-# Also exported in setup_runtime_env; set here so preset cmds can reference it
-# before cmd_launch is called.
+# Default is fp8_e4m3 for most GPUs. On SM121 (GB10), setup_runtime_env()
+# overrides this to "auto" (BF16) since FP8 KV cache is untested on SM121.
+# User can always force a specific value: KV_CACHE_DTYPE=fp8_e4m3 ./sglang.sh ...
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8_e4m3}"
 
 # ── Shared launch arg groups ────────────────────────────────────────────────
@@ -113,6 +114,9 @@ setup_runtime_env() {
     export SGLANG_QUANTIZE_LM_HEAD_FP8="${SGLANG_QUANTIZE_LM_HEAD_FP8:-1}"
 
     # Post-quantize MTP draft model layers to FP8 (halves MoE+fc bandwidth per draft step)
+    # NOTE: On SM121, this is overridden to 0 below (Triton fp8e4nv dot not supported).
+    # Save user's explicit value so SM121 override doesn't clobber it.
+    local _user_mtp_fp8="${SGLANG_MTP_FP8:-}"
     export SGLANG_MTP_FP8="${SGLANG_MTP_FP8:-1}"
 
     # KV cache quantization dtype (default: fp8_e4m3; set to fp4_e2m1 to test NVFP4 KV cache)
@@ -132,6 +136,36 @@ setup_runtime_env() {
     # sglang checks for 9.15+ due to a Conv3d bug (pytorch#168167).
     # Conv3d is not used in LLM inference, so this check is safe to skip.
     export SGLANG_DISABLE_CUDNN_CHECK=1
+
+    # ── SM121 (GB10) specific overrides ────────────────────────────────────
+    # Detect SM121 at runtime and apply necessary workarounds:
+    #   - KV_CACHE_DTYPE=auto: FP8 KV cache untested on SM121, use BF16
+    #   - SGLANG_ENABLE_JIT_DEEPGEMM=0: DeepGEMM JIT fails on SM121
+    #   - SGLANG_MTP_FP8=0: MTP FP8 post-quant untested with NVFP4 path
+    local gpu_sm
+    gpu_sm=$(python -c "
+import torch
+if torch.cuda.is_available():
+    cc = torch.cuda.get_device_capability()
+    print(f'{cc[0]}.{cc[1]}')
+else:
+    print('0.0')
+" 2>/dev/null || echo "0.0")
+
+    if [[ "${gpu_sm}" == "12.1" ]]; then
+        info "Detected SM121 (GB10) — applying workarounds"
+        # Override KV cache dtype unless user explicitly set it before invoking
+        # the script (the script default is fp8_e4m3; SM121 needs auto/BF16).
+        if [[ "${KV_CACHE_DTYPE}" == "fp8_e4m3" ]]; then
+            export KV_CACHE_DTYPE="auto"
+        fi
+        export SGLANG_ENABLE_JIT_DEEPGEMM="${SGLANG_ENABLE_JIT_DEEPGEMM:-0}"
+        # Triton fp8e4nv dot not supported on SM120+, so MTP MoE FP8 post-quant
+        # is incompatible. Only override if user didn't explicitly set it.
+        if [[ -z "${_user_mtp_fp8}" ]]; then
+            export SGLANG_MTP_FP8=0
+        fi
+    fi
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -497,12 +531,16 @@ cmd_qwen35_nvfp4() {
     cmd_launch \
         --model-path "${model}" \
         --quantization compressed-tensors \
+        --speculative-draft-model-quantization compressed-tensors \
         --kv-cache-dtype "${KV_CACHE_DTYPE}" \
         --mem-fraction-static 0.85 \
         --context-length "${CONTEXT_LENGTH}" \
         --max-running-requests 3 \
-        --attention-backend triton \
+        --attention-backend flashinfer \
+        --linear-attn-backend triton \
+        --linear-attn-prefill-backend triton \
         --chunked-prefill-size -1 \
+        --disable-piecewise-cuda-graph \
         --disable-multimodal \
         "${spec_args[@]}" \
         --reasoning-parser qwen3 \
@@ -539,7 +577,7 @@ cmd_qwen35_35b_nvfp4() {
         --mem-fraction-static 0.75 \
         --context-length "${CONTEXT_LENGTH}" \
         --max-running-requests 3 \
-        --attention-backend triton \
+        --attention-backend flashinfer \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size -1 \
         --disable-multimodal \
