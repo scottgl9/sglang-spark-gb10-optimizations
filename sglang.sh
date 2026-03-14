@@ -36,6 +36,7 @@
 # Key environment overrides:
 #   CONTEXT_LENGTH             Context window tokens (default: 65536)
 #   DISABLE_MTP=1              Disable speculative decoding for Qwen3.5-NVFP4
+#   DISABLE_NGRAM=1            Disable NGRAM speculative decoding for minimax
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -631,24 +632,45 @@ cmd_qwen3_coder_next_fp8() {
 }
 
 cmd_minimax() {
-    local model="${MINIMAX_MODEL:-${HOME}/models/MiniMax-M2.5-REAP-139B-A10B-NVFP4}"
+    local model="${MINIMAX_MODEL:-saricles/MiniMax-M2.5-REAP-139B-A10B-NVFP4-GB10}"
+    local ctx="${CONTEXT_LENGTH:-65536}"
 
-    info "Preset: MiniMax M2.5 REAP 139B NVFP4 (modelopt_fp4)"
+    # Speculative decoding via prompt-lookup (n-gram)
+    # Requires no draft model — matches token n-grams from prompt/context.
+    # Best acceptance on code/repetitive text (~1.3-1.8×); still useful for chat.
+    # Disable with: DISABLE_NGRAM=1 ./sglang.sh minimax
+    local spec_args=()
+    if [[ "${DISABLE_NGRAM:-}" != "1" ]]; then
+        spec_args=(
+            --speculative-algorithm NGRAM
+            --speculative-num-draft-tokens 5
+            --speculative-ngram-max-match-window-size 16
+        )
+        info "Preset: MiniMax M2.5 REAP 139B NVFP4 + NGRAM speculative"
+    else
+        info "Preset: MiniMax M2.5 REAP 139B NVFP4 (NGRAM disabled)"
+    fi
     info "  Model : ${model}"
+    info "  CtxLen: ${ctx}"
+    info "  KV    : ${KV_CACHE_DTYPE}  (FP8 KV cache — halves KV bandwidth)"
+    info "  EPLB  : enabled (154 experts, topk=8)"
 
     cmd_launch \
         --model-path "${model}" \
         --served-model-name MiniMax-M2.5 \
         --quantization modelopt_fp4 \
-        --mem-fraction-static 0.85 \
+        --mem-fraction-static 0.88 \
         --max-running-requests 8 \
-        --context-length 16384 \
+        --context-length "${ctx}" \
         --attention-backend triton \
         --moe-runner-backend flashinfer_cutlass \
+        --enable-eplb \
+        --ep-num-redundant-experts 8 \
         --reasoning-parser minimax \
         --tool-call-parser minimax-m2 \
         --trust-remote-code \
         --disable-cuda-graph \
+        "${spec_args[@]}" \
         "${SERVER_ARGS[@]}" \
         "$@"
 }
@@ -695,12 +717,16 @@ Model path overrides:
 Environment overrides:
   CONTEXT_LENGTH=N               Context window tokens (default: 65536)
   DISABLE_MTP=1                  Disable speculative decoding (Qwen3.5-NVFP4)
+  DISABLE_NGRAM=1                Disable NGRAM speculative decoding (minimax)
+  MINIMAX_MODEL=<path>           Override MiniMax model path
 
 Examples:
   ./sglang.sh build
   ./sglang.sh Qwen3.5-NVFP4
   CONTEXT_LENGTH=32768 ./sglang.sh Qwen3.5-NVFP4
-  ./sglang.sh minimax --context-length 8192
+  ./sglang.sh minimax
+  CONTEXT_LENGTH=32768 ./sglang.sh minimax
+  DISABLE_NGRAM=1 ./sglang.sh minimax    # NGRAM off, baseline
 
 EOF
 }
