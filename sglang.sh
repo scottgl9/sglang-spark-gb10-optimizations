@@ -10,6 +10,7 @@
 #   Qwen3-Coder-Next-NVFP4 [args] GadflyII Qwen3-Coder-Next NVFP4
 #   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next dense FP8
 #   minimax [args]                 MiniMax M2.5 REAP 139B NVFP4
+#   nemotron [args]                NVIDIA Nemotron-3-Super 120B-A12B NVFP4 + MTP
 #
 # Context window (default 65536 — override with CONTEXT_LENGTH):
 #   CONTEXT_LENGTH=32768 ./sglang.sh Qwen3.5-NVFP4
@@ -32,10 +33,11 @@
 #   QWEN3_CODER_NVFP4_MODEL=GadflyII/...         ./sglang.sh Qwen3-Coder-Next-NVFP4
 #   QWEN3_CODER_MODEL=Qwen/Qwen3-Coder-Next-FP8  ./sglang.sh Qwen3-Coder-Next-FP8
 #   MINIMAX_MODEL=/path/to/model                  ./sglang.sh minimax
+#   NEMOTRON_MODEL=/path/to/model                 ./sglang.sh nemotron
 #
 # Key environment overrides:
 #   CONTEXT_LENGTH             Context window tokens (default: 65536)
-#   DISABLE_MTP=1              Disable speculative decoding for Qwen3.5-NVFP4
+#   DISABLE_MTP=1              Disable speculative decoding for Qwen3.5-NVFP4 / nemotron
 #   DISABLE_NGRAM=1            Disable NGRAM speculative decoding for minimax
 #
 # ─────────────────────────────────────────────────────────────────────────────
@@ -538,7 +540,7 @@ cmd_qwen35_nvfp4() {
         --attention-backend flashinfer \
         --linear-attn-backend triton \
         --linear-attn-prefill-backend triton \
-        --chunked-prefill-size -1 \
+        --chunked-prefill-size 16384 \
         --disable-piecewise-cuda-graph \
         --disable-multimodal \
         "${spec_args[@]}" \
@@ -577,7 +579,7 @@ cmd_qwen35_35b_nvfp4() {
         --max-running-requests 3 \
         --attention-backend flashinfer \
         --linear-attn-prefill-backend triton \
-        --chunked-prefill-size -1 \
+        --chunked-prefill-size 16384 \
         --disable-multimodal \
         "${spec_args[@]}" \
         --reasoning-parser qwen3 \
@@ -675,6 +677,51 @@ cmd_minimax() {
         "$@"
 }
 
+cmd_nemotron() {
+    # Default to the locally cached snapshot; override with NEMOTRON_MODEL=<path>
+    local _snap="/home/scottgl/.cache/huggingface/hub/models--nvidia--NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/snapshots/bd90f177c8c69d8f3969c61e7e8f1afaba57ae61"
+    local model="${NEMOTRON_MODEL:-${_snap}}"
+
+    # MTP (NEXTN) — model has num_nextn_predict_layers=1, so 1 draft step is the max.
+    # Disable with: DISABLE_MTP=1 ./sglang.sh nemotron
+    local spec_args=()
+    if [[ "${DISABLE_MTP:-}" != "1" ]]; then
+        spec_args=(
+            --speculative-algorithm NEXTN
+            --speculative-num-steps 1
+            --speculative-eagle-topk 1
+            --speculative-num-draft-tokens 1
+            --mamba-scheduler-strategy extra_buffer
+        )
+        export SGLANG_ENABLE_SPEC_V2=1
+        info "Preset: Nemotron-3-Super-120B-A12B-NVFP4 (modelopt_fp4, MTP NEXTN 1-step)"
+    else
+        info "Preset: Nemotron-3-Super-120B-A12B-NVFP4 (modelopt_fp4, MTP DISABLED)"
+    fi
+    info "  Model : ${model}"
+    info "  CtxLen: ${CONTEXT_LENGTH}"
+
+    cmd_launch \
+        --model-path "${model}" \
+        --served-model-name nemotron \
+        --quantization w4afp8 \
+        --mem-fraction-static 0.88 \
+        --context-length "${CONTEXT_LENGTH}" \
+        --max-running-requests 4 \
+        --attention-backend flashinfer \
+        --linear-attn-backend triton \
+        --linear-attn-prefill-backend triton \
+        --chunked-prefill-size 16384 \
+        --disable-piecewise-cuda-graph \
+        --disable-multimodal \
+        "${spec_args[@]}" \
+        --reasoning-parser nemotron_3 \
+        --tool-call-parser qwen3_coder \
+        --trust-remote-code \
+        "${SERVER_ARGS[@]}" \
+        "$@"
+}
+
 cmd_shell() {
     [[ -d "${VENV_DIR}" ]] || die "Venv not found at ${VENV_DIR}. Run: ./sglang.sh build"
     info "Activating SGLang venv — type 'deactivate' to exit"
@@ -696,6 +743,7 @@ Commands:
   Qwen3-Coder-Next-NVFP4 [args] GadflyII/Qwen3-Coder-Next-NVFP4
   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next-FP8
   minimax [args]                 MiniMax M2.5 REAP 139B NVFP4
+  nemotron [args]                NVIDIA Nemotron-3-Super 120B-A12B NVFP4 + MTP
 
 Build options:
   --skip-venv       Skip venv creation
@@ -713,6 +761,7 @@ Model path overrides:
   QWEN3_CODER_NVFP4_MODEL=<path>  Override Qwen3-Coder-Next-NVFP4 model
   QWEN3_CODER_MODEL=<path>        Override Qwen3-Coder-Next-FP8 model
   MINIMAX_MODEL=<path>             Override MiniMax model path
+  NEMOTRON_MODEL=<path>            Override Nemotron model path
 
 Environment overrides:
   CONTEXT_LENGTH=N               Context window tokens (default: 65536)
@@ -744,6 +793,7 @@ case "${CMD}" in
     Qwen3-Coder-Next-NVFP4|qwen3-coder-next-nvfp4) cmd_qwen3_coder_next_nvfp4 "$@" ;;
     Qwen3-Coder-Next-FP8|qwen3-coder-next-fp8) cmd_qwen3_coder_next_fp8 "$@" ;;
     minimax|MiniMax) cmd_minimax "$@" ;;
+    nemotron|Nemotron|nemotron-3-super|Nemotron-3-Super) cmd_nemotron "$@" ;;
     ""|help|-h|--help) usage ;;
     *) die "Unknown command: ${CMD}. Run './sglang.sh help' for usage." ;;
 esac
