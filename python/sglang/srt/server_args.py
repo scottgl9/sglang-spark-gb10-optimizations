@@ -243,6 +243,20 @@ MAMBA_SCHEDULER_STRATEGY_CHOICES = ["auto", "no_buffer", "extra_buffer"]
 
 MAMBA_BACKEND_CHOICES = ["triton", "flashinfer"]
 
+
+def _parse_mamba_full_memory_ratio(value: str) -> Union[float, str]:
+    """Parse --mamba-full-memory-ratio: accepts a float or 'auto'."""
+    if value == "auto":
+        return "auto"
+    try:
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid value '{value}' for --mamba-full-memory-ratio. "
+            "Must be a float or 'auto'."
+        )
+
+
 LINEAR_ATTN_KERNEL_BACKEND_CHOICES = ["triton", "cutedsl", "flashinfer"]
 
 
@@ -575,7 +589,7 @@ class ServerArgs:
     # Mamba cache
     max_mamba_cache_size: Optional[int] = None
     mamba_ssm_dtype: Optional[str] = None
-    mamba_full_memory_ratio: float = 0.9
+    mamba_full_memory_ratio: Union[float, str] = 0.9
     mamba_scheduler_strategy: str = "auto"
     mamba_track_interval: int = 256
     linear_attn_backend: str = "triton"
@@ -2167,7 +2181,7 @@ class ServerArgs:
             self._handle_mamba_radix_cache(
                 model_arch=model_arch,
                 support_mamba_cache=True,
-                support_mamba_cache_extra_buffer=False,
+                support_mamba_cache_extra_buffer=True,
                 sm100_default_attention_backend="flashinfer",
             )
             assert self.attention_backend != "triton", (
@@ -5797,9 +5811,11 @@ class ServerArgs:
         )
         parser.add_argument(
             "--mamba-full-memory-ratio",
-            type=float,
+            type=_parse_mamba_full_memory_ratio,
             default=ServerArgs.mamba_full_memory_ratio,
-            help="The ratio of mamba state memory to full kv cache memory.",
+            help="The ratio of mamba state memory to full kv cache memory. "
+            'Use "auto" to compute the ratio based on the model\'s SSM-to-attention '
+            "layer distribution.",
         )
         parser.add_argument(
             "--mamba-scheduler-strategy",
