@@ -2055,7 +2055,8 @@ class ServerArgs:
                         )
                 else:
                     self.quantization = model_config.quantization
-                self.moe_runner_backend = "flashinfer_cutlass"
+                if self.moe_runner_backend in ("auto", None):
+                    self.moe_runner_backend = "flashinfer_cutlass"
 
             self._handle_mamba_radix_cache(
                 model_arch=model_arch,
