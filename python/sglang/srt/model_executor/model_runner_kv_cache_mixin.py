@@ -109,14 +109,17 @@ class ModelRunnerKVCacheMixin:
             # Use ratio-based calculation to auto-fit available memory
             assert config.mamba2_cache_params.mamba_cache_per_req > 0
 
+            ratio = server_args.mamba_full_memory_ratio
+            if ratio == "auto":
+                ratio = self._compute_auto_mamba_ratio(config)
+                server_args.mamba_full_memory_ratio = ratio
+
             # allocate the memory based on the ratio between mamba state memory vs. full kv cache memory
             # solve the equations:
             # 1. mamba_state_memory + full_kv_cache_memory == total_rest_memory
-            # 2. mamba_state_memory / full_kv_cache_memory == server_args.mamba_full_memory_ratio
+            # 2. mamba_state_memory / full_kv_cache_memory == ratio
             mamba_state_memory_raw = (
-                total_rest_memory
-                * server_args.mamba_full_memory_ratio
-                / (1 + server_args.mamba_full_memory_ratio)
+                total_rest_memory * ratio / (1 + ratio)
             )
             # calculate the max_mamba_cache_size based on the given total mamba memory
             server_args.max_mamba_cache_size = int(
@@ -130,6 +133,37 @@ class ModelRunnerKVCacheMixin:
             / (1 << 30)
         )
         return total_rest_memory - mamba_state_memory
+
+    def _compute_auto_mamba_ratio(self: ModelRunner, config) -> float:
+        """Compute mamba_full_memory_ratio based on model layer distribution.
+
+        Uses the ratio of SSM layers to attention layers to estimate how
+        memory should be split between the mamba state pool and the KV cache
+        pool.  Models with more SSM layers get a higher ratio (more memory
+        for mamba states).
+        """
+        num_ssm_layers = len(config.mamba2_cache_params.layers)
+        num_attn_layers = len(config.full_attention_layer_ids)
+
+        if num_attn_layers == 0:
+            # Pure SSM model — almost all memory goes to mamba states.
+            ratio = 3.0
+        else:
+            # Scale linearly: ratio = ssm_layers / attn_layers, clamped.
+            ratio = num_ssm_layers / num_attn_layers
+
+        ratio = max(0.3, min(ratio, 3.0))
+
+        logger.info(
+            "Auto-computed mamba_full_memory_ratio=%.2f "
+            "(ssm_layers=%d, attn_layers=%d, mamba_pool=%.0f%%, kv_pool=%.0f%%)",
+            ratio,
+            num_ssm_layers,
+            num_attn_layers,
+            100 * ratio / (1 + ratio),
+            100 / (1 + ratio),
+        )
+        return ratio
 
     def calculate_mla_kv_cache_dim(self: ModelRunner) -> int:
         is_nsa_model = is_deepseek_nsa(self.model_config.hf_config)
