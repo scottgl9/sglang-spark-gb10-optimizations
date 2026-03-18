@@ -154,6 +154,10 @@ def fused_marlin_moe(
     topk = topk_ids.shape[1]
     gemm1_n = 2 * N if is_gated else N
 
+    # For gated activations (e.g. SiLU), w1 projects to 2*N (gate + up).
+    # For non-gated activations (e.g. relu2), w1 projects to N directly.
+    w1_out = 2 * N if is_gated else N
+
     # M block size selection logic
     # TODO: tune this further for specific models
     for block_size_m in [8, 16, 32, 48, 64]:
@@ -167,7 +171,7 @@ def fused_marlin_moe(
     )
 
     if workspace is None:
-        max_workspace_size = (max(2 * N, K) // 64) * (
+        max_workspace_size = (max(w1_out, K) // 64) * (
             sorted_token_ids.size(0) // block_size_m
         )
         device = hidden_states.device
@@ -243,6 +247,12 @@ def fused_marlin_moe(
         silu_and_mul(intermediate_cache1.view(-1, gemm1_n), intermediate_cache2)
     elif activation == "silu" and not is_gated:
         intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
+    elif activation == "gelu" and is_gated:
+        from sgl_kernel import gelu_and_mul
+
+        gelu_and_mul(intermediate_cache1.view(-1, gemm1_n), intermediate_cache2)
+    elif activation == "gelu" and not is_gated:
+        intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
     elif activation == "relu2" and not is_gated:
         intermediate_cache2 = torch.square(F.relu(intermediate_cache1.view(-1, N)))
     else:

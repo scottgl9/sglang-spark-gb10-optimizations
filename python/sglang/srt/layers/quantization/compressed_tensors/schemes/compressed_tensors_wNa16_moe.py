@@ -426,6 +426,8 @@ class CompressedTensorsWNA16MoE(CompressedTensorsMoEScheme):
             is_k_full=self.is_k_full,
             routed_scaling_factor=self.moe_runner_config.routed_scaling_factor,
             workspace=layer.workspace,
+            activation=self.moe_runner_config.activation,
+            is_gated=self.moe_runner_config.is_gated,
         )
         return StandardCombineInput(hidden_states=output)
 
