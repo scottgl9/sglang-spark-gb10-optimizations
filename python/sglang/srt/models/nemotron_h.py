@@ -972,6 +972,16 @@ class NemotronHForCausalLM(nn.Module):
                         continue
                     is_expert_weight = True
                     name_mapped = name.replace(weight_name, param_name)
+                    # w4afp8 checkpoint stores per-group scales as weight_scale,
+                    # but the fused MoE param is weight_scale_inv. Try _inv suffix.
+                    if name_mapped not in params_dict:
+                        name_mapped_inv = name_mapped.replace(
+                            "weight_scale", "weight_scale_inv"
+                        )
+                        if name_mapped_inv not in params_dict:
+                            # e.g. weight_scale_2 (per-tensor scale) — not used
+                            continue
+                        name_mapped = name_mapped_inv
                     param = params_dict[name_mapped]
                     param.weight_loader(
                         param,
@@ -996,6 +1006,28 @@ class NemotronHForCausalLM(nn.Module):
                         weight_loader(param, loaded_weight)
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
+
+        # FP8 post-quantization for remaining BF16 layers (~1.5 GB savings)
+        import os
+
+        if os.environ.get("SGLANG_NEMOTRON_FP8_POST_QUANT", "0") == "1":
+            from sglang.srt.layers.quantization.fp8_post_quant import (
+                apply_fp8_post_quant_linear_base,
+            )
+
+            n = apply_fp8_post_quant_linear_base(
+                self,
+                layer_patterns=[
+                    "in_proj",  # Mamba in_proj (5 BF16 layers)
+                    "out_proj",  # Mamba out_proj (5 BF16 layers)
+                    "o_proj",  # Attention output proj (6 BF16 layers)
+                    "qkv_proj",  # Attention QKV proj (6 BF16 layers)
+                    "fc1_latent_proj",  # MoE latent down-projection (37 BF16 layers)
+                    "fc2_latent_proj",  # MoE latent up-projection (37 BF16 layers)
+                    "lm_head",  # LM head (1024 MB -> 512 MB)
+                ],
+            )
+            logger.info("Nemotron-H FP8 post-quant: converted %d layers", n)
 
 
 EntryClass = [NemotronHForCausalLM]
