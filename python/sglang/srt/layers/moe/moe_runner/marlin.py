@@ -87,8 +87,6 @@ def fused_experts_none_to_marlin(
     hidden_states = dispatch_output.hidden_states
     topk_output = dispatch_output.topk_output
 
-    assert runner_config.activation == "silu", "Only SiLU activation is supported."
-
     if (
         MARLIN_MOE_WORKSPACE is None
         or MARLIN_MOE_WORKSPACE.device != hidden_states.device
@@ -118,6 +116,8 @@ def fused_experts_none_to_marlin(
         is_k_full=quant_info.is_k_full,
         inplace=runner_config.inplace,
         routed_scaling_factor=runner_config.routed_scaling_factor,
+        activation=runner_config.activation,
+        is_gated=runner_config.is_gated,
     ).to(hidden_states.dtype)
 
     return StandardCombineInput(
