@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from sglang.srt.utils import is_cuda
 from sglang.srt.utils.custom_op import register_custom_op
@@ -47,6 +48,8 @@ def fused_marlin_moe(
     is_k_full: bool = True,
     inplace: bool = False,
     routed_scaling_factor: Optional[float] = None,
+    activation: str = "silu",
+    is_gated: bool = True,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -99,6 +102,10 @@ def fused_marlin_moe(
     N = w2.shape[1] * 16
     topk = topk_ids.shape[1]
 
+    # For gated activations (e.g. SiLU), w1 projects to 2*N (gate + up).
+    # For non-gated activations (e.g. relu2), w1 projects to N directly.
+    w1_out = 2 * N if is_gated else N
+
     # M block size selection logic
     # TODO: tune this further for specific models
     for block_size_m in [8, 16, 32, 48, 64]:
@@ -112,7 +119,7 @@ def fused_marlin_moe(
     )
 
     if workspace is None:
-        max_workspace_size = (max(2 * N, K) // 64) * (
+        max_workspace_size = (max(w1_out, K) // 64) * (
             sorted_token_ids.size(0) // block_size_m
         )
         device = hidden_states.device
@@ -131,12 +138,12 @@ def fused_marlin_moe(
         dtype=hidden_states.dtype,
     )
     intermediate_cache13 = torch.empty(
-        (M * topk_ids.shape[1] * max(2 * N, K),),
+        (M * topk_ids.shape[1] * max(w1_out, K),),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
-    intermediate_cache1 = intermediate_cache13[: M * topk_ids.shape[1] * 2 * N]
-    intermediate_cache1 = intermediate_cache1.view(-1, 2 * N)
+    intermediate_cache1 = intermediate_cache13[: M * topk_ids.shape[1] * w1_out]
+    intermediate_cache1 = intermediate_cache1.view(-1, w1_out)
     intermediate_cache3 = intermediate_cache13[: M * topk_ids.shape[1] * K]
     intermediate_cache3 = intermediate_cache3.view(-1, K)
 
@@ -166,7 +173,7 @@ def fused_marlin_moe(
         is_ep=expert_map is not None,
         b_q_type=scalar_type1,
         size_m=M,
-        size_n=2 * N,
+        size_n=w1_out,
         size_k=K,
         is_k_full=is_k_full,
         use_atomic_add=use_atomic_add,
@@ -174,7 +181,25 @@ def fused_marlin_moe(
         is_zp_float=False,
     )
 
-    silu_and_mul(intermediate_cache1.view(-1, 2 * N), intermediate_cache2)
+    # Apply activation function
+    if activation == "silu" and is_gated:
+        silu_and_mul(intermediate_cache1.view(-1, 2 * N), intermediate_cache2)
+    elif activation == "silu" and not is_gated:
+        intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
+    elif activation == "gelu" and is_gated:
+        from sgl_kernel import gelu_and_mul
+
+        gelu_and_mul(intermediate_cache1.view(-1, 2 * N), intermediate_cache2)
+    elif activation == "gelu" and not is_gated:
+        intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
+    elif activation == "relu2" and not is_gated:
+        intermediate_cache2 = torch.square(
+            F.relu(intermediate_cache1.view(-1, N))
+        )
+    else:
+        raise ValueError(
+            f"Unsupported activation: {activation=}, with {is_gated=}"
+        )
 
     if expert_map is not None:
         intermediate_cache3.zero_()
