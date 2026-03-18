@@ -1142,11 +1142,19 @@ def _set_envs_and_config(server_args: ServerArgs):
                 "at https://docs.flashinfer.ai/installation.html.",
             )
         if _is_cuda:
-            assert_pkg_version(
-                "sglang-kernel",
-                "0.4.1",
-                "Please reinstall the latest version with `pip install sglang-kernel --force-reinstall`",
-            )
+            try:
+                assert_pkg_version(
+                    "sglang-kernel",
+                    "0.4.1",
+                    "Please reinstall the latest version with `pip install sglang-kernel --force-reinstall`",
+                )
+            except Exception:
+                # Fallback: accept sgl-kernel (old package name, e.g. cu130 wheel)
+                assert_pkg_version(
+                    "sgl-kernel",
+                    "0.4.0",
+                    "Please install sgl-kernel or sglang-kernel",
+                )
 
     # Signal handlers can only be registered from the main thread.
     if threading.current_thread() is threading.main_thread():
