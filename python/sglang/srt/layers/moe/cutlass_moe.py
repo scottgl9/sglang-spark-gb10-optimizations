@@ -359,6 +359,8 @@ def cutlass_moe_fp4(
     topk_ids: torch.Tensor,
     params: CutlassMoEParams,
     apply_router_weight_on_input: bool = False,
+    activation: str = "silu",
+    is_gated: bool = True,
 ):
     """
     MoE implementation for FP4 Inputs
@@ -423,10 +425,16 @@ def cutlass_moe_fp4(
     assert (
         k_a // 2 == half_k_w1 and params.hidden_size == k_w2
     ), "Hidden size mismatch between a, w1 and w2"
-    assert (
-        nx2_w1 == params.intermediate_size_per_partition * 2
-        and half_n_w2 == params.intermediate_size_per_partition // 2
-    ), ("mismatch in " "expected `n`")
+    if is_gated:
+        assert (
+            nx2_w1 == params.intermediate_size_per_partition * 2
+            and half_n_w2 == params.intermediate_size_per_partition // 2
+        ), "mismatch in expected `n` (gated)"
+    else:
+        assert (
+            nx2_w1 == params.intermediate_size_per_partition
+            and half_n_w2 == params.intermediate_size_per_partition // 2
+        ), "mismatch in expected `n` (non-gated)"
     assert 2 * half_k_w1 == k_w2, "Hidden size mismatch w2 and w1"
     assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
 
@@ -448,6 +456,11 @@ def cutlass_moe_fp4(
         params.blockscale_offsets,
     )
 
+    if not is_gated:
+        # prepare_moe_input hardcodes problem_sizes1[:, 1] = 2*n (gated assumption).
+        # For non-gated, GEMM1 output is N columns, not 2*N.
+        params.problem_sizes1[:, 1] = params.intermediate_size_per_partition
+
     rep_a_fp4, rep_a_blockscale = scaled_fp4_experts_quant(
         a,
         a1_gscale,
@@ -467,11 +480,34 @@ def cutlass_moe_fp4(
     )
     del rep_a_fp4, rep_a_blockscale
 
-    # hidden size dimension is split to one halfpytho sized tensor.
-    intermediate = torch.empty(
-        (m_a * num_topk, w1_fp4.shape[1] // 2), device=device, dtype=out_dtype
-    )
-    silu_and_mul(c1, intermediate)
+    # Apply activation function after first GEMM
+    if is_gated:
+        # Gated: w1 output is 2*N, activation produces N
+        intermediate = torch.empty(
+            (m_a * num_topk, w1_fp4.shape[1] // 2), device=device, dtype=out_dtype
+        )
+        if activation == "silu":
+            silu_and_mul(c1, intermediate)
+        elif activation == "gelu":
+            from sgl_kernel import gelu_and_mul
+
+            gelu_and_mul(c1, intermediate)
+        else:
+            raise ValueError(
+                f"Unsupported gated activation: {activation}"
+            )
+    else:
+        # Non-gated: w1 output is N, activation is applied in-place
+        if activation == "relu2":
+            intermediate = torch.square(torch.nn.functional.relu(c1))
+        elif activation == "silu":
+            intermediate = torch.nn.functional.silu(c1)
+        elif activation == "gelu":
+            intermediate = torch.nn.functional.gelu(c1)
+        else:
+            raise ValueError(
+                f"Unsupported non-gated activation: {activation}"
+            )
 
     int_fp4, int_blockscale = scaled_fp4_experts_quant(
         intermediate,

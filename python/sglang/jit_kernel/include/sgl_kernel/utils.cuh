@@ -95,10 +95,9 @@ namespace device {
 #if !defined(SGL_CUDA_ARCH)
 #error "SGL_CUDA_ARCH is not defined. JIT compilation must inject -DSGL_CUDA_ARCH via load_jit()."
 #endif
-#if defined(__CUDA_ARCH__)
-static_assert(
-    __CUDA_ARCH__ == SGL_CUDA_ARCH, "SGL_CUDA_ARCH mismatch: injected arch flag does not match device target");
-#endif
+// Note: __CUDA_ARCH__ varies per -gencode target during multi-arch builds
+// (e.g. tvm_ffi may add sm_103a alongside sm_121a). SGL_CUDA_ARCH is a
+// single value for host-side decisions; skip the device-side assert.
 #define SGL_ARCH_HOPPER_OR_GREATER (SGL_CUDA_ARCH >= 900)
 #define SGL_ARCH_BLACKWELL_OR_GREATER ((SGL_CUDA_ARCH >= 1000) && (CUDA_VERSION >= 12090))
 #else  // USE_ROCM
