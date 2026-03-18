@@ -99,12 +99,14 @@ class CutlassMoEParams:
         num_experts: int,
         intermediate_size_per_partition: int,
         hidden_size: int,
+        is_gated: bool = True,
     ):
         self.cutlass_moe_type = cutlass_moe_type
         self.device = device
         self.num_experts = num_experts
         self.intermediate_size_per_partition = intermediate_size_per_partition
         self.hidden_size = hidden_size
+        self.is_gated = is_gated
         self.n = self.intermediate_size_per_partition
         self.k = self.hidden_size
         self.e = self.num_experts
@@ -114,8 +116,11 @@ class CutlassMoEParams:
         self.ab_strides_2 = torch.full(
             (self.e,), self.n, dtype=torch.int64, device=self.device
         )
+        # For gated (SiLU): GEMM1 output has 2*N columns (gate + up)
+        # For non-gated (relu2): GEMM1 output has N columns
+        gemm1_out_cols = 2 * self.n if is_gated else self.n
         self.c_strides_13 = torch.full(
-            (self.e,), 2 * self.n, dtype=torch.int64, device=self.device
+            (self.e,), gemm1_out_cols, dtype=torch.int64, device=self.device
         )
         self.c_strides_2 = torch.full(
             (self.e,), self.k, dtype=torch.int64, device=self.device
