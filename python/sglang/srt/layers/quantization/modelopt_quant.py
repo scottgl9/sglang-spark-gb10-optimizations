@@ -2000,6 +2000,7 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
                     num_experts=layer.num_experts,  # global num experts
                     intermediate_size_per_partition=inter_size,  # n
                     hidden_size=hidden_size,
+                    is_gated=layer.moe_runner_config.is_gated,
                 )  # k
 
         # Optionally convert to sparse FP4 for decode acceleration
@@ -2217,6 +2218,8 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             params=layer.cutlass_moe_params,
             apply_router_weight_on_input=moe_runner_config.apply_router_weight_on_input,
+            activation=activation,
+            is_gated=moe_runner_config.is_gated,
         ).to(x.dtype)
         # Scale by routed_scaling_factor is fused into select_experts.
         return StandardCombineInput(hidden_states=output)
