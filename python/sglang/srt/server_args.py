@@ -315,6 +315,20 @@ MAMBA_RADIX_CACHE_STRATEGY_CHOICES = [
 
 MAMBA_BACKEND_CHOICES = ["triton", "flashinfer"]
 
+
+def _parse_mamba_full_memory_ratio(value: str) -> Union[float, str]:
+    """Parse --mamba-full-memory-ratio: accepts a float or 'auto'."""
+    if value == "auto":
+        return "auto"
+    try:
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid value '{value}' for --mamba-full-memory-ratio. "
+            "Must be a float or 'auto'."
+        )
+
+
 LINEAR_ATTN_KERNEL_BACKEND_CHOICES = ["triton", "cutedsl", "flashinfer"]
 
 
@@ -1810,8 +1824,13 @@ class ServerArgs:
         "Number of Philox rounds to use for stochastic rounding of FP16 Mamba SSM cache writes. Triton uses the Triton default when set to 0; FlashInfer uses 10 rounds when set to 0.",
     ] = 0
     mamba_full_memory_ratio: A[
-        float,
-        "The ratio of mamba state memory to full kv cache memory.",
+        Union[float, str],
+        Arg(
+            help="The ratio of mamba state memory to full kv cache memory. "
+            'Use "auto" to compute the ratio based on the model\'s SSM-to-attention '
+            "layer distribution.",
+            type_parser=_parse_mamba_full_memory_ratio,
+        ),
     ] = 0.9
     mamba_radix_cache_strategy: A[
         str,
