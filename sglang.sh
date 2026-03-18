@@ -691,20 +691,20 @@ cmd_nemotron() {
             --speculative-num-steps 1
             --speculative-eagle-topk 1
             --speculative-num-draft-tokens 1
-            --mamba-scheduler-strategy extra_buffer
         )
         export SGLANG_ENABLE_SPEC_V2=1
-        info "Preset: Nemotron-3-Super-120B-A12B-NVFP4 (modelopt_fp4, MTP NEXTN 1-step)"
+        info "Preset: Nemotron-3-Super-120B-A12B-NVFP4 (modelopt_fp4, MTP NEXTN 1-step, FP8 post-quant)"
     else
-        info "Preset: Nemotron-3-Super-120B-A12B-NVFP4 (modelopt_fp4, MTP DISABLED)"
+        info "Preset: Nemotron-3-Super-120B-A12B-NVFP4 (modelopt_fp4, MTP DISABLED, FP8 post-quant)"
     fi
+    export SGLANG_NEMOTRON_FP8_POST_QUANT=1
     info "  Model : ${model}"
     info "  CtxLen: ${CONTEXT_LENGTH}"
 
     cmd_launch \
         --model-path "${model}" \
         --served-model-name nemotron \
-        --quantization w4afp8 \
+        --quantization modelopt_fp8 \
         --mem-fraction-static 0.88 \
         --context-length "${CONTEXT_LENGTH}" \
         --max-running-requests 4 \
@@ -712,7 +712,10 @@ cmd_nemotron() {
         --linear-attn-backend triton \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
+        --moe-runner-backend triton \
         --disable-piecewise-cuda-graph \
+        --disable-cuda-graph \
+        --disable-radix-cache \
         --disable-multimodal \
         "${spec_args[@]}" \
         --reasoning-parser nemotron_3 \
