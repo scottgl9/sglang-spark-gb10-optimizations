@@ -843,17 +843,38 @@ def get_tokenizer(
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
-        if not trust_remote_code and (
-            "does not exist or is not currently imported." in str(e)
-            or "requires you to execute the tokenizer file" in str(e)
-        ):
-            err_msg = (
-                "Failed to load the tokenizer. If the tokenizer is a custom "
-                "tokenizer not yet available in the HuggingFace transformers "
-                "library, consider setting `trust_remote_code=True` in LLM "
-                "or using the `--trust-remote-code` flag in the CLI."
-            )
-            raise RuntimeError(err_msg) from e
+        if "does not exist or is not currently imported." in str(e):
+            # Mistral native models use tokenizer_class="TokenizersBackend"
+            # which HF can't resolve. Fall back to loading tokenizer.json directly.
+            tokenizer_json = Path(tokenizer_name) / "tokenizer.json"
+            if tokenizer_json.is_file():
+                logger.info(
+                    "Unknown tokenizer_class in config; loading tokenizer.json directly."
+                )
+                tokenizer = PreTrainedTokenizerFast(
+                    tokenizer_file=str(tokenizer_json)
+                )
+            elif not trust_remote_code:
+                err_msg = (
+                    "Failed to load the tokenizer. If the tokenizer is a custom "
+                    "tokenizer not yet available in the HuggingFace transformers "
+                    "library, consider setting `trust_remote_code=True` in LLM "
+                    "or using the `--trust-remote-code` flag in the CLI."
+                )
+                raise RuntimeError(err_msg) from e
+            else:
+                raise e
+        elif "requires you to execute the tokenizer file" in str(e):
+            if not trust_remote_code:
+                err_msg = (
+                    "Failed to load the tokenizer. If the tokenizer is a custom "
+                    "tokenizer not yet available in the HuggingFace transformers "
+                    "library, consider setting `trust_remote_code=True` in LLM "
+                    "or using the `--trust-remote-code` flag in the CLI."
+                )
+                raise RuntimeError(err_msg) from e
+            else:
+                raise e
         else:
             raise e
 
