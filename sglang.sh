@@ -758,7 +758,7 @@ cmd_mistral_small4() {
         --mem-fraction-static 0.88 \
         --context-length "${CONTEXT_LENGTH}" \
         --max-running-requests 4 \
-        --attention-backend flashinfer \
+        --attention-backend triton \
         --chunked-prefill-size 16384 \
         --chat-template mistral \
         --tool-call-parser mistral \
