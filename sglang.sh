@@ -734,18 +734,24 @@ cmd_mistral_small4() {
     local model="${MISTRAL_MODEL:-${_snap}}"
     local eagle="${MISTRAL_EAGLE_MODEL:-${_eagle}}"
 
+    # EAGLE is disabled by default: the EAGLE draft model was trained on the
+    # unquantized base model. NVFP4 quantization changes output distributions
+    # enough that EAGLE predictions diverge (~6% accept rate = no speedup).
+    # Enable with: ENABLE_EAGLE=1 ./sglang.sh mistral-small-4
     local spec_args=()
-    if [[ "${DISABLE_EAGLE:-}" != "1" ]]; then
+    if [[ "${ENABLE_EAGLE:-}" == "1" ]]; then
         spec_args=(
             --speculative-algorithm EAGLE
             --speculative-draft-model-path "${eagle}"
+            --speculative-draft-model-quantization fp8
             --speculative-num-steps 3
             --speculative-eagle-topk 4
             --speculative-num-draft-tokens 16
         )
-        info "Preset: Mistral-Small-4-119B NVFP4 + EAGLE"
+        export SGLANG_QUANTIZE_LM_HEAD_FP8=0
+        info "Preset: Mistral-Small-4-119B NVFP4 + EAGLE (experimental)"
     else
-        info "Preset: Mistral-Small-4-119B NVFP4 (EAGLE disabled)"
+        info "Preset: Mistral-Small-4-119B NVFP4"
     fi
     info "  Model : ${model}"
     info "  Eagle : ${eagle}"
@@ -817,7 +823,7 @@ Environment overrides:
   CONTEXT_LENGTH=N               Context window tokens (default: 65536)
   DISABLE_MTP=1                  Disable speculative decoding (Qwen3.5-NVFP4)
   DISABLE_NGRAM=1                Disable NGRAM speculative decoding (minimax)
-  DISABLE_EAGLE=1                Disable EAGLE speculative decoding (mistral-small-4)
+  ENABLE_EAGLE=1                 Enable EAGLE speculative decoding (mistral-small-4, experimental)
   MINIMAX_MODEL=<path>           Override MiniMax model path
 
 Examples:
