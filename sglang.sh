@@ -11,6 +11,7 @@
 #   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next dense FP8
 #   minimax [args]                 MiniMax M2.5 REAP 139B NVFP4
 #   nemotron [args]                NVIDIA Nemotron-3-Super 120B-A12B NVFP4 + MTP
+#   mistral-small-4 [args]        Mistral-Small-4-119B NVFP4 + EAGLE
 #
 # Context window (default 65536 — override with CONTEXT_LENGTH):
 #   CONTEXT_LENGTH=32768 ./sglang.sh Qwen3.5-NVFP4
@@ -34,6 +35,8 @@
 #   QWEN3_CODER_MODEL=Qwen/Qwen3-Coder-Next-FP8  ./sglang.sh Qwen3-Coder-Next-FP8
 #   MINIMAX_MODEL=/path/to/model                  ./sglang.sh minimax
 #   NEMOTRON_MODEL=/path/to/model                 ./sglang.sh nemotron
+#   MISTRAL_MODEL=/path/to/model                  ./sglang.sh mistral-small-4
+#   MISTRAL_EAGLE_MODEL=/path/to/eagle             ./sglang.sh mistral-small-4
 #
 # Key environment overrides:
 #   CONTEXT_LENGTH             Context window tokens (default: 65536)
@@ -541,6 +544,7 @@ cmd_qwen35_nvfp4() {
         --linear-attn-backend triton \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
+        --mamba-full-memory-ratio auto \
         --disable-piecewise-cuda-graph \
         --disable-multimodal \
         "${spec_args[@]}" \
@@ -580,6 +584,7 @@ cmd_qwen35_35b_nvfp4() {
         --attention-backend flashinfer \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
+        --mamba-full-memory-ratio auto \
         --disable-multimodal \
         "${spec_args[@]}" \
         --reasoning-parser qwen3 \
@@ -713,14 +718,52 @@ cmd_nemotron() {
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
         --moe-runner-backend triton \
-        --disable-piecewise-cuda-graph \
-        --disable-cuda-graph \
         --disable-radix-cache \
         --disable-multimodal \
         "${spec_args[@]}" \
         --reasoning-parser nemotron_3 \
         --tool-call-parser qwen3_coder \
         --trust-remote-code \
+        "${SERVER_ARGS[@]}" \
+        "$@"
+}
+
+cmd_mistral_small4() {
+    local _snap="/home/scottgl/.cache/huggingface/hub/models--mistralai--Mistral-Small-4-119B-2603-NVFP4/snapshots/043f75a201a226d8e9cbbc3316af437ea25d3912"
+    local _eagle="/home/scottgl/.cache/huggingface/hub/models--mistralai--Mistral-Small-4-119B-2603-eagle/snapshots/3ff299733b3dcb701617a22add5ce796304f7f05"
+    local model="${MISTRAL_MODEL:-${_snap}}"
+    local eagle="${MISTRAL_EAGLE_MODEL:-${_eagle}}"
+
+    local spec_args=()
+    if [[ "${DISABLE_EAGLE:-}" != "1" ]]; then
+        spec_args=(
+            --speculative-algorithm EAGLE
+            --speculative-draft-model-path "${eagle}"
+            --speculative-num-steps 3
+            --speculative-eagle-topk 4
+            --speculative-num-draft-tokens 16
+        )
+        info "Preset: Mistral-Small-4-119B NVFP4 + EAGLE"
+    else
+        info "Preset: Mistral-Small-4-119B NVFP4 (EAGLE disabled)"
+    fi
+    info "  Model : ${model}"
+    info "  Eagle : ${eagle}"
+    info "  CtxLen: ${CONTEXT_LENGTH}"
+
+    cmd_launch \
+        --model-path "${model}" \
+        --served-model-name mistral-small-4 \
+        --quantization compressed-tensors \
+        --mem-fraction-static 0.88 \
+        --context-length "${CONTEXT_LENGTH}" \
+        --max-running-requests 4 \
+        --attention-backend flashinfer \
+        --chunked-prefill-size 16384 \
+        --tool-call-parser mistral \
+        --disable-multimodal \
+        --trust-remote-code \
+        "${spec_args[@]}" \
         "${SERVER_ARGS[@]}" \
         "$@"
 }
@@ -747,6 +790,7 @@ Commands:
   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next-FP8
   minimax [args]                 MiniMax M2.5 REAP 139B NVFP4
   nemotron [args]                NVIDIA Nemotron-3-Super 120B-A12B NVFP4 + MTP
+  mistral-small-4 [args]        Mistral-Small-4-119B NVFP4 + EAGLE
 
 Build options:
   --skip-venv       Skip venv creation
@@ -765,11 +809,14 @@ Model path overrides:
   QWEN3_CODER_MODEL=<path>        Override Qwen3-Coder-Next-FP8 model
   MINIMAX_MODEL=<path>             Override MiniMax model path
   NEMOTRON_MODEL=<path>            Override Nemotron model path
+  MISTRAL_MODEL=<path>             Override Mistral-Small-4 model path
+  MISTRAL_EAGLE_MODEL=<path>       Override Mistral-Small-4 EAGLE draft path
 
 Environment overrides:
   CONTEXT_LENGTH=N               Context window tokens (default: 65536)
   DISABLE_MTP=1                  Disable speculative decoding (Qwen3.5-NVFP4)
   DISABLE_NGRAM=1                Disable NGRAM speculative decoding (minimax)
+  DISABLE_EAGLE=1                Disable EAGLE speculative decoding (mistral-small-4)
   MINIMAX_MODEL=<path>           Override MiniMax model path
 
 Examples:
@@ -797,6 +844,7 @@ case "${CMD}" in
     Qwen3-Coder-Next-FP8|qwen3-coder-next-fp8) cmd_qwen3_coder_next_fp8 "$@" ;;
     minimax|MiniMax) cmd_minimax "$@" ;;
     nemotron|Nemotron|nemotron-3-super|Nemotron-3-Super) cmd_nemotron "$@" ;;
+    mistral-small-4|Mistral-Small-4|mistral-small4) cmd_mistral_small4 "$@" ;;
     ""|help|-h|--help) usage ;;
     *) die "Unknown command: ${CMD}. Run './sglang.sh help' for usage." ;;
 esac
