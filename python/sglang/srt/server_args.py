@@ -2138,6 +2138,20 @@ class ServerArgs:
                 "Setting page_size=16 for aiter unified attention on Qwen3VLForConditionalGeneration."
             )
 
+        # SM121 (GB10): CUTLASS/TRT-LLM FP4 MoE broken — force Marlin for all models.
+        # This is a general fallback; model-specific blocks above may have already set it.
+        if (
+            is_sm120_supported()
+            and self.quantization == "compressed-tensors"
+            and self.moe_a2a_backend == "none"
+            and self.moe_runner_backend == "auto"
+        ):
+            self.moe_runner_backend = "marlin"
+            logger.warning(
+                "SM120/SM121 detected with compressed-tensors NVFP4: "
+                "forcing marlin MoE backend (CUTLASS/TRT-LLM broken on GB10)"
+            )
+
         if envs.SGLANG_EMBEDDINGS_SPARSE_HEAD.is_set():
             self.disable_overlap_schedule = True
             logger.warning(
