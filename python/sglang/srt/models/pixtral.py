@@ -239,6 +239,13 @@ class PixtralForConditionalGeneration(nn.Module):
     def get_embed_and_head(self):
         return self.language_model.get_embed_and_head()
 
+    @property
+    def lm_head(self):
+        return self.language_model.lm_head
+
+    def set_embed_and_head(self, embed, head):
+        self.language_model.set_embed_and_head(embed, head)
+
 
 class PatchMerger(nn.Module):
     """
