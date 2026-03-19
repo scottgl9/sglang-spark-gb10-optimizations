@@ -861,14 +861,24 @@ def get_tokenizer(
         # currently being imported, suggest using the --trust-remote-code flag.
         if "does not exist or is not currently imported." in str(e):
             # Mistral native models use tokenizer_class="TokenizersBackend"
-            # which HF can't resolve. Fall back to loading tokenizer.json directly.
+            # which HF can't resolve. Fall back to loading tokenizer.json with
+            # config overridden to use PreTrainedTokenizerFast.
             tokenizer_json = Path(tokenizer_name) / "tokenizer.json"
+            tokenizer_config = Path(tokenizer_name) / "tokenizer_config.json"
             if tokenizer_json.is_file():
                 logger.info(
                     "Unknown tokenizer_class in config; loading tokenizer.json directly."
                 )
+                # Load config to get special tokens, then override tokenizer_class
+                extra_kwargs = {}
+                if tokenizer_config.is_file():
+                    with open(tokenizer_config) as f:
+                        tc = json.load(f)
+                    for key in ("bos_token", "eos_token", "pad_token", "unk_token"):
+                        if key in tc and tc[key] is not None:
+                            extra_kwargs[key] = tc[key]
                 tokenizer = PreTrainedTokenizerFast(
-                    tokenizer_file=str(tokenizer_json)
+                    tokenizer_file=str(tokenizer_json), **extra_kwargs
                 )
             elif not trust_remote_code:
                 err_msg = (
