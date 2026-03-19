@@ -22,6 +22,10 @@ def adapt_config_dict(
     if bool(config_dict.get("quantization")):
         config_dict = _remap_mistral_quantization_args(config_dict)
 
+    is_mla = config_dict.get("q_lora_rank") is not None
+    if is_mla:
+        config_dict = _remap_mistral_mla_args(config_dict)
+
     is_moe = bool(config_dict.get("moe"))
     is_mistral_large_3 = (
         is_moe and (config_dict["moe"].get("num_shared_experts") or 0) > 0
@@ -228,6 +232,24 @@ def _remap_mistral_audio_args(config: dict) -> dict:
     return config
 
 
+def _remap_mistral_mla_args(config: dict) -> dict:
+    """Create synthetic MoE config for non-MoE MLA models (e.g., EAGLE draft)."""
+    if not config.get("moe"):
+        moe = {
+            "num_experts": 1,
+            "first_k_dense_replace": config.get("num_hidden_layers"),
+            "route_every_n": 1,
+            "num_shared_experts": 1,
+            "expert_hidden_dim": config.get("intermediate_size"),
+            "num_experts_per_tok": 1,
+            "routed_scale": 1.0,
+            "num_expert_groups": 1,
+            "num_expert_groups_per_tok": 1,
+        }
+        config["moe"] = moe
+    return config
+
+
 def _remap_moe_args(config: dict) -> dict:
     moe_config_map = {
         "route_every_n": "moe_layer_freq",
@@ -309,12 +331,17 @@ class MistralConfigParser:
         return config_dict, config
 
 
+def _is_mistral_native_format(model_path) -> bool:
+    """Detect Mistral native params.json format (no HF config.json)."""
+    p = Path(str(model_path))
+    if not p.is_dir():
+        return False
+    return (p / "params.json").exists() and not (p / "config.json").exists()
+
+
 def is_mistral_model(name) -> bool:
     """Return True if *name* refers to a Mistral model needing the custom parser."""
-    lower = str(name).lower()
-    return (
-        "mistral-large-3" in lower or "mistral-small-4" in lower or "leanstral" in lower
-    )
+    return _is_mistral_native_format(name)
 
 
 @lru_cache(maxsize=2)
