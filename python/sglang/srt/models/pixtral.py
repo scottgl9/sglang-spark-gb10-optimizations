@@ -82,6 +82,7 @@ class PixtralForConditionalGeneration(nn.Module):
     def __init__(self, *, config, prefix: str = "", **kwargs):
         super().__init__()
         self.config = config
+        self.language_only = getattr(config, "language_only", False)
         dataclass_fields = {field.name for field in fields(VisionEncoderArgs)}
         config_dict = self.config.vision_config.to_dict()
         if config_dict.get("rope_parameters"):  # transformers v5 compatibility
@@ -99,27 +100,48 @@ class PixtralForConditionalGeneration(nn.Module):
             quant_config=kwargs.get("quant_config"),
         )
 
-        self.vision_encoder = VisionTransformer(self.vision_args)
+        if not self.language_only:
+            dataclass_fields = {field.name for field in fields(VisionEncoderArgs)}
+            vision_args = {
+                key: value
+                for key, value in self.config.vision_config.to_dict().items()
+                if key in dataclass_fields
+            }
 
-        if self.vision_args.add_pre_mm_projector_layer_norm:
-            self.pre_mm_projector_norm = RMSNorm(self.vision_args.hidden_size, eps=1e-5)
+            self.vision_args = VisionEncoderArgs(**vision_args)
 
-        if self.vision_args.mm_projector_id == PATCH_MERGE:
-            self.patch_merger = PatchMerger(
-                vision_encoder_dim=self.vision_args.hidden_size,
-                spatial_merge_size=self.vision_args.spatial_merge_size,
-                use_mlp_bias=False,
+            self.vision_encoder = VisionTransformer(self.vision_args)
+
+            if self.vision_args.add_pre_mm_projector_layer_norm:
+                self.pre_mm_projector_norm = RMSNorm(self.vision_args.hidden_size, eps=1e-5)
+
+            if self.vision_args.mm_projector_id == PATCH_MERGE:
+                self.patch_merger = PatchMerger(
+                    vision_encoder_dim=self.vision_args.hidden_size,
+                    spatial_merge_size=self.vision_args.spatial_merge_size,
+                    use_mlp_bias=False,
+                )
+
+            self.vision_language_adapter = VisionLanguageAdapter(
+                self.vision_args, dim=self.config.text_config.hidden_size
             )
-
-        self.vision_language_adapter = VisionLanguageAdapter(
-            self.vision_args, dim=self.config.text_config.hidden_size
-        )
 
     def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
         pattern = MultiModalityDataPaddingPatternMultimodalTokens()
         return pattern.pad_input_tokens(input_ids, mm_inputs)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        if self.language_only:
+            _vision_prefixes = (
+                "vision_encoder", "vision_language_adapter",
+                "patch_merger", "pre_mm_projector_norm",
+            )
+            llm_weights = (
+                (n, w) for n, w in weights if not n.startswith(_vision_prefixes)
+            )
+            self.language_model.load_weights(llm_weights)
+            return
+
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("vision_encoder")
 
@@ -210,6 +232,8 @@ class PixtralForConditionalGeneration(nn.Module):
         return image_embeds
 
     def forward(self, input_ids, positions, forward_batch):
+        if self.language_only:
+            return self.language_model.forward(input_ids, positions, forward_batch)
         return general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
