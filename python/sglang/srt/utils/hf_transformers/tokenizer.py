@@ -190,11 +190,21 @@ def _auto_tokenizer_from_pretrained(tokenizer_name, *args, **common_kwargs):
             # Mistral native models use tokenizer_class="TokenizersBackend"
             # which HF can't resolve. Fall back to loading tokenizer.json directly.
             tokenizer_json = Path(str(tokenizer_name)) / "tokenizer.json"
+            tokenizer_config = Path(str(tokenizer_name)) / "tokenizer_config.json"
             if tokenizer_json.is_file():
                 logger.info(
                     "Unknown tokenizer_class in config; loading tokenizer.json directly."
                 )
-                return PreTrainedTokenizerFast(tokenizer_file=str(tokenizer_json))
+                extra_kwargs = {}
+                if tokenizer_config.is_file():
+                    with open(tokenizer_config) as f:
+                        tc = json.load(f)
+                    for key in ("bos_token", "eos_token", "pad_token", "unk_token"):
+                        if key in tc and tc[key] is not None:
+                            extra_kwargs[key] = tc[key]
+                return PreTrainedTokenizerFast(
+                    tokenizer_file=str(tokenizer_json), **extra_kwargs
+                )
             if not common_kwargs.get("trust_remote_code"):
                 err_msg = (
                     "Failed to load the tokenizer. If the tokenizer is a custom "
