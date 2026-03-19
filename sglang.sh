@@ -760,6 +760,7 @@ cmd_mistral_small4() {
         --max-running-requests 4 \
         --attention-backend flashinfer \
         --chunked-prefill-size 16384 \
+        --chat-template mistral \
         --tool-call-parser mistral \
         --disable-multimodal \
         --trust-remote-code \
