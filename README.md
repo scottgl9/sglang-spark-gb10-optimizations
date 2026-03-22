@@ -1,91 +1,167 @@
-<div align="center" id="sglangtop">
-<img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
+# SGLang Spark GB10 Optimizations
 
-[![PyPI](https://img.shields.io/pypi/v/sglang)](https://pypi.org/project/sglang)
-![PyPI - Downloads](https://static.pepy.tech/badge/sglang?period=month)
-[![license](https://img.shields.io/github/license/sgl-project/sglang.svg)](https://github.com/sgl-project/sglang/tree/main/LICENSE)
-[![issue resolution](https://img.shields.io/github/issues-closed-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![open issues](https://img.shields.io/github/issues-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/sgl-project/sglang)
+Fork of [SGLang](https://github.com/sgl-project/sglang) with optimizations for the **NVIDIA Spark (GB10)** — Grace Blackwell SM 12.1.
 
-</div>
+These patches fix critical issues that prevent NVFP4-quantized models from running on SM121 and add performance optimizations specific to the GB10's unified memory architecture.
 
---------------------------------------------------------------------------------
+## Hardware
 
-<p align="center">
-<a href="https://lmsys.org/blog/"><b>Blog</b></a> |
-<a href="https://docs.sglang.io/"><b>Documentation</b></a> |
-<a href="https://roadmap.sglang.io/"><b>Roadmap</b></a> |
-<a href="https://slack.sglang.io/"><b>Join Slack</b></a> |
-<a href="https://meet.sglang.io/"><b>Weekly Dev Meeting</b></a> |
-<a href="https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#slides"><b>Slides</b></a>
-</p>
+| Component | Spec |
+|-----------|------|
+| Platform | ASUS Ascent GX10 / NVIDIA Spark (GB10) |
+| GPU | Grace Blackwell, SM 12.1 |
+| Memory | 128 GB unified (CPU+GPU shared) |
+| CUDA | 13.0, `TORCH_CUDA_ARCH_LIST=12.1` |
 
-## News
-- [2026/02] 🔥 Unlocking 25x Inference Performance with SGLang on NVIDIA GB300 NVL72 ([blog](https://lmsys.org/blog/2026-02-20-gb300-inferencex/)).
-- [2026/01] 🔥 SGLang Diffusion accelerates video and image generation ([blog](https://lmsys.org/blog/2026-01-16-sglang-diffusion/)).
-- [2025/12] SGLang provides day-0 support for latest open models ([MiMo-V2-Flash](https://lmsys.org/blog/2025-12-16-mimo-v2-flash/), [Nemotron 3 Nano](https://lmsys.org/blog/2025-12-15-run-nvidia-nemotron-3-nano/), [Mistral Large 3](https://github.com/sgl-project/sglang/pull/14213), [LLaDA 2.0 Diffusion LLM](https://lmsys.org/blog/2025-12-19-diffusion-llm/), [MiniMax M2](https://lmsys.org/blog/2025-11-04-miminmax-m2/)).
-- [2025/10] 🔥 SGLang now runs natively on TPU with the SGLang-Jax backend ([blog](https://lmsys.org/blog/2025-10-29-sglang-jax/)).
-- [2025/09] Deploying DeepSeek on GB200 NVL72 with PD and Large Scale EP (Part II): 3.8x Prefill, 4.8x Decode Throughput ([blog](https://lmsys.org/blog/2025-09-25-gb200-part-2/)).
-- [2025/09] SGLang Day 0 Support for DeepSeek-V3.2 with Sparse Attention ([blog](https://lmsys.org/blog/2025-09-29-deepseek-V32/)).
-- [2025/08] SGLang x AMD SF Meetup on 8/22: Hands-on GPU workshop, tech talks by AMD/xAI/SGLang, and networking ([Roadmap](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_sglang_roadmap.pdf), [Large-scale EP](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_sglang_ep.pdf), [Highlights](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_highlights.pdf), [AITER/MoRI](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_aiter_mori.pdf), [Wave](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_wave.pdf)).
+## Performance
+
+| Model | Quantization | Decode Speed | MTP Accept Rate | MTP Accept Length |
+|-------|-------------|-------------|----------------|-------------------|
+| Qwen3.5-35B-A3B | NVFP4 + GDN post-quant | ~76 tok/s | ~97% | ~2.9 |
+| Qwen3.5-122B-A10B | NVFP4 + FP8 post-quant | ~37.9 tok/s | ~90% | ~2.7 |
+
+## Key Optimizations
+
+### 1. NVFP4 Quantization via Marlin FP4
+
+**Problem:** All CUTLASS FP4 GEMM operations produce corrupt output (zeros/NaN) on SM121.
+
+**Solution:** Route all NVFP4 through the Marlin FP4 backend with a scale interleaving fix.
+
+- **Marlin FP4 scale interleaving** — The Marlin FP4 kernel divides `s_tb_groups` by 2, causing adjacent K-groups (16 elements each) to share one scale. Fix: byte-interleave adjacent FP8 scale rows in 8-byte chunks before storing. Applied to both dense and MoE pathways.
+- **Marlin MoE kernel fix** — Uncommented `dequant_fp8_scales` block and fixed missing `moe_sum_reduce` 3rd argument (`routed_scaling_factor=1.0`).
+- **GDN post-quantization** — Runtime NVFP4 quantization of BF16 GatedDeltaNet layers via Marlin FP4 repack (avoids CUTLASS entirely).
+- **MoE backend routing** — SM121 auto-routes compressed-tensors NVFP4 MoE to Marlin backend instead of broken CUTLASS/TRT-LLM paths.
+- **relu2/gelu activation** — Added support for non-standard activations in Marlin FP4 MoE.
+
+Key files:
+- `python/sglang/srt/layers/quantization/marlin_utils.py` — `nvfp4_marlin_interleave_scales()`, scale processing
+- `python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4.py` — Marlin FP4 dense
+- `python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py` — Marlin MoE
+- `python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h` — MoE kernel template
+
+### 2. FP8 Post-Quantization
+
+**Finding:** CUTLASS FP8 (`fp8_scaled_mm` from sgl-kernel) is **2-3x faster** than BF16 matmul at M=1 on SM121. In contrast, `torch._scaled_mm` dispatches to `sm89_xmma` and is *not* faster than BF16 on SM121.
+
+- **CUTLASS FP8 for BF16 GDN layers** — Per-channel FP8 quantization + CUTLASS GEMM for layers that can't use NVFP4 (e.g., `in_proj_qkv`, `o_proj` in linear attention blocks).
+- **lm_head FP8 routing** — Fixed `LogitsProcessor._compute_lm_head()` which bypassed FP8 for `ParallelLMHead` (checked `hasattr(lm_head, "weight")` → True → fell through to `torch.matmul` BF16 fallback). Now checks `lm_head.weight.dtype == torch.float8_e4m3fn`.
+- **MTP draft model FP8** — FP8 post-quantization for speculative decoding draft models with weight_scale sharing from the target model.
+
+Key files:
+- `python/sglang/srt/layers/quantization/fp8_post_quant.py` — FP8 post-quant implementation
+- `python/sglang/srt/layers/logits_processor.py` — lm_head FP8 routing fix
+
+### 3. Attention & KV Cache
+
+- **Triton attention for MLA models** — FlashInfer MLA is 30x slower on SM121; auto-select Triton attention backend.
+- **FP8 KV cache auto-selection** — Auto-detect Blackwell and enable FP8 E4M3 KV cache (halves KV bandwidth vs BF16).
+
+### 4. Kernel Optimizations
+
+- **Sparse FP4 GEMV** — Custom kernel for MoE decode on GB10.
+- **CUTLASS FP8 Blockwise GEMM** — Improvements for SM120/SM121.
+- **FP4 kernel pre-warm** — Pre-warm piecewise CUDA graphs to avoid first-request latency.
+
+## Supported Models
+
+| Model | Preset | Notes |
+|-------|--------|-------|
+| Qwen3.5-122B-A10B-NVFP4 | `./sglang.sh Qwen3.5-NVFP4` | MTP speculative decoding, FP8 KV cache |
+| Qwen3.5-35B-A3B-NVFP4 | `./sglang.sh Qwen3.5-35B-NVFP4` | MTP, GDN post-quant |
+| Mistral-Small-4-119B NVFP4 | `./sglang.sh mistral-small-4` | Triton attention, EAGLE disabled by default |
+| Nemotron-3-Super-120B-A12B-NVFP4 | `./sglang.sh nemotron` | FP8 post-quant, Triton MoE |
+| MiniMax M2.5 | `./sglang.sh minimax` | NGRAM speculation |
+| Qwen3-Coder-Next NVFP4 | `./sglang.sh Qwen3-Coder-Next-NVFP4` | |
+| Qwen3-Coder-Next FP8 | `./sglang.sh Qwen3-Coder-Next-FP8` | Dense FP8 |
+
+## Quick Start
+
+### Build
+
+```bash
+./sglang.sh build
+```
+
+This creates a `.sglang/` venv with all dependencies compiled for SM 12.1. See `./sglang.sh --help` for partial rebuild options (`--skip-venv`, `--skip-torch`, etc.).
+
+### Launch
+
+```bash
+# Qwen3.5-122B MoE NVFP4 with MTP speculative decoding
+./sglang.sh Qwen3.5-NVFP4
+
+# Qwen3.5-35B with MTP
+./sglang.sh Qwen3.5-35B-NVFP4
+
+# Override context length
+CONTEXT_LENGTH=32768 ./sglang.sh Qwen3.5-NVFP4
+
+# Disable speculative decoding
+DISABLE_MTP=1 ./sglang.sh Qwen3.5-NVFP4
+```
+
+### Environment Overrides
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTEXT_LENGTH` | 65536 | Context window size |
+| `KV_CACHE_DTYPE` | fp8_e4m3 | KV cache dtype (`auto` for BF16) |
+| `DISABLE_MTP` | 0 | Disable MTP speculative decoding |
+| `DISABLE_NGRAM` | 0 | Disable NGRAM speculation (minimax) |
+
+Model paths can be overridden with `QWEN35_MODEL`, `NEMOTRON_MODEL`, `MISTRAL_MODEL`, etc.
+
+## Known Limitations
+
+- **CUTLASS FP4 broken on SM121** — All CUTLASS FP4 GEMM produces zeros/NaN. Workaround: Marlin FP4 backend.
+- **Nemotron-H NVFP4 MoE + relu2** — FlashInfer CUTLASS FP4 kernel doesn't support relu2 activation on SM121 (512 experts).
+- **EAGLE + NVFP4** — EAGLE draft models trained on BF16 are ineffective with NVFP4 base (~6% accept rate). Disabled by default for Mistral-Small-4.
+- **`torch._scaled_mm` slow on SM121** — Dispatches to `sm89_xmma` kernel. Use `fp8_scaled_mm` (sgl-kernel CUTLASS FP8) instead.
+
+## Key Files Modified
 
 <details>
-<summary>More</summary>
+<summary>Quantization framework</summary>
 
-- [2025/11] SGLang Diffusion accelerates video and image generation ([blog](https://lmsys.org/blog/2025-11-07-sglang-diffusion/)).
-- [2025/10] PyTorch Conference 2025 SGLang Talk ([slide](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/sglang_pytorch_2025.pdf)).
-- [2025/10] SGLang x Nvidia SF Meetup on 10/2 ([recap](https://x.com/lmsysorg/status/1975339501934510231)).
-- [2025/08] SGLang provides day-0 support for OpenAI gpt-oss model ([instructions](https://github.com/sgl-project/sglang/issues/8833))
-- [2025/06] SGLang, the high-performance serving infrastructure powering trillions of tokens daily, has been awarded the third batch of the Open Source AI Grant by a16z ([a16z blog](https://a16z.com/advancing-open-source-ai-through-benchmarks-and-bold-experimentation/)).
-- [2025/05] Deploying DeepSeek with PD Disaggregation and Large-scale Expert Parallelism on 96 H100 GPUs ([blog](https://lmsys.org/blog/2025-05-05-large-scale-ep/)).
-- [2025/06] Deploying DeepSeek on GB200 NVL72 with PD and Large Scale EP (Part I): 2.7x Higher Decoding Throughput ([blog](https://lmsys.org/blog/2025-06-16-gb200-part-1/)).
-- [2025/03] Supercharge DeepSeek-R1 Inference on AMD Instinct MI300X ([AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/DeepSeekR1-Part2/README.html))
-- [2025/03] SGLang Joins PyTorch Ecosystem: Efficient LLM Serving Engine ([PyTorch blog](https://pytorch.org/blog/sglang-joins-pytorch/))
-- [2025/02] Unlock DeepSeek-R1 Inference Performance on AMD Instinct™ MI300X GPU ([AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/DeepSeekR1_Perf/README.html))
-- [2025/01] SGLang provides day one support for DeepSeek V3/R1 models on NVIDIA and AMD GPUs with DeepSeek-specific optimizations. ([instructions](https://github.com/sgl-project/sglang/tree/main/benchmark/deepseek_v3), [AMD blog](https://www.amd.com/en/developer/resources/technical-articles/amd-instinct-gpus-power-deepseek-v3-revolutionizing-ai-development-with-sglang.html), [10+ other companies](https://x.com/lmsysorg/status/1887262321636221412))
-- [2024/12] v0.4 Release: Zero-Overhead Batch Scheduler, Cache-Aware Load Balancer, Faster Structured Outputs ([blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/)).
-- [2024/10] The First SGLang Online Meetup ([slides](https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#the-first-sglang-online-meetup)).
-- [2024/09] v0.3 Release: 7x Faster DeepSeek MLA, 1.5x Faster torch.compile, Multi-Image/Video LLaVA-OneVision ([blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/)).
-- [2024/07] v0.2 Release: Faster Llama3 Serving with SGLang Runtime (vs. TensorRT-LLM, vLLM) ([blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/)).
-- [2024/02] SGLang enables **3x faster JSON decoding** with compressed finite state machine ([blog](https://lmsys.org/blog/2024-02-05-compressed-fsm/)).
-- [2024/01] SGLang provides up to **5x faster inference** with RadixAttention ([blog](https://lmsys.org/blog/2024-01-17-sglang/)).
-- [2024/01] SGLang powers the serving of the official **LLaVA v1.6** release demo ([usage](https://github.com/haotian-liu/LLaVA?tab=readme-ov-file#demo)).
+- `python/sglang/srt/layers/quantization/marlin_utils.py` — NVFP4 scale processing + interleaving
+- `python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4.py` — Marlin FP4 dense GEMM
+- `python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w4a4_nvfp4_moe.py` — Marlin FP4 MoE
+- `python/sglang/srt/layers/quantization/fp8_post_quant.py` — CUTLASS FP8 post-quant
+- `python/sglang/srt/layers/logits_processor.py` — lm_head FP8 routing
 
 </details>
 
-## About
-SGLang is a high-performance serving framework for large language models and multimodal models.
-It is designed to deliver low-latency and high-throughput inference across a wide range of setups, from a single GPU to large distributed clusters.
-Its core features include:
+<details>
+<summary>Kernels</summary>
 
-- **Fast Runtime**: Provides efficient serving with RadixAttention for prefix caching, a zero-overhead CPU scheduler, prefill-decode disaggregation, speculative decoding, continuous batching, paged attention, tensor/pipeline/expert/data parallelism, structured outputs, chunked prefill, quantization (FP4/FP8/INT4/AWQ/GPTQ), and multi-LoRA batching.
-- **Broad Model Support**: Supports a wide range of language models (Llama, Qwen, DeepSeek, Kimi, GLM, GPT, Gemma, Mistral, etc.), embedding models (e5-mistral, gte, mcdse), reward models (Skywork), and diffusion models (WAN, Qwen-Image), with easy extensibility for adding new models. Compatible with most Hugging Face models and OpenAI APIs.
-- **Extensive Hardware Support**: Runs on NVIDIA GPUs (GB200/B300/H100/A100/Spark/5090), AMD GPUs (MI355/MI300), Intel Xeon CPUs, Google TPUs, Ascend NPUs, and more.
-- **Active Community**: SGLang is open-source and supported by a vibrant community with widespread industry adoption, powering over 400,000 GPUs worldwide.
-- **RL & Post-Training Backbone**: SGLang is a proven rollout backend used for training many frontier models, with native RL integrations and adoption by well-known post-training frameworks such as [**AReaL**](https://github.com/inclusionAI/AReaL), [**Miles**](https://github.com/radixark/miles), [**slime**](https://github.com/THUDM/slime), [**Tunix**](https://github.com/google/tunix), [**verl**](https://github.com/volcengine/verl) and more.
+- `python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h` — MoE dequant_fp8_scales
+- `python/sglang/jit_kernel/csrc/gemm/nvfp4/nvfp4_quant.cuh` — FP4 quantization
+- `python/sglang/jit_kernel/nvfp4.py` — FP4 JIT kernel
 
-## Getting Started
-- [Install SGLang](https://docs.sglang.io/get_started/install.html)
-- [Quick Start](https://docs.sglang.io/basic_usage/send_request.html)
-- [Backend Tutorial](https://docs.sglang.io/basic_usage/openai_api_completions.html)
-- [Frontend Tutorial](https://docs.sglang.io/references/frontend/frontend_tutorial.html)
-- [Contribution Guide](https://docs.sglang.io/developer_guide/contribution_guide.html)
+</details>
 
-## Benchmark and Performance
-Learn more in the release blogs: [v0.2 blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/), [v0.3 blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/), [v0.4 blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/), [Large-scale expert parallelism](https://lmsys.org/blog/2025-05-05-large-scale-ep/), [GB200 rack-scale parallelism](https://lmsys.org/blog/2025-09-25-gb200-part-2/), [GB300 long context](https://lmsys.org/blog/2026-02-19-gb300-longctx/).
+<details>
+<summary>Models</summary>
 
-## Adoption and Sponsorship
-SGLang has been deployed at large scale, generating trillions of tokens in production each day. It is trusted and adopted by a wide range of leading enterprises and institutions, including xAI, AMD, NVIDIA, Intel, LinkedIn, Cursor, Oracle Cloud, Google Cloud, Microsoft Azure, AWS, Atlas Cloud, Voltage Park, Nebius, DataCrunch, Novita, InnoMatrix, MIT, UCLA, the University of Washington, Stanford, UC Berkeley, Tsinghua University, Jam & Tea Studios, Baseten, and other major technology organizations.
-As an open-source LLM inference engine, SGLang has become the de facto industry standard, with deployments running on over 400,000 GPUs worldwide.
-SGLang is currently hosted under the non-profit open-source organization [LMSYS](https://lmsys.org/about/).
+- `python/sglang/srt/models/qwen3_5.py` — SM121 GDN post-quant, FP8 post-quant
+- `python/sglang/srt/models/mistral_small.py` — Mistral-Small-4 NVFP4 support
+- `python/sglang/srt/models/jet_nemotron.py` — Nemotron-H NVFP4 loading
 
-<img src="https://raw.githubusercontent.com/sgl-project/sgl-learning-materials/refs/heads/main/slides/adoption.png" alt="logo" width="800" margin="10px"></img>
+</details>
 
-## Contact Us
-For enterprises interested in adopting or deploying SGLang at scale, including technical consulting, sponsorship opportunities, or partnership inquiries, please contact us at [sglang@lmsys.org](mailto:sglang@lmsys.org).
+<details>
+<summary>Runtime</summary>
 
-Long-term active SGLang contributors are eligible for coding agent sponsorship, such as Cursor, Claude Code, or OpenAI Codex. Email [sglang@lmsys.org](mailto:sglang@lmsys.org) with your most important commits or pull requests.
+- `python/sglang/srt/server_args.py` — SM121 detection, backend auto-selection
+- `sglang.sh` — Build script + model launch presets
 
-## Acknowledgment
-We learned the design and reused code from the following projects: [Guidance](https://github.com/guidance-ai/guidance), [vLLM](https://github.com/vllm-project/vllm), [LightLLM](https://github.com/ModelTC/lightllm), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), [Outlines](https://github.com/outlines-dev/outlines), and [LMQL](https://github.com/eth-sri/lmql).
+</details>
+
+## Upstream
+
+Based on [sgl-project/sglang](https://github.com/sgl-project/sglang) main branch. This fork contains 227 commits of GB10-specific optimizations on top of upstream.
+
+## License
+
+Apache 2.0 (same as upstream SGLang)
