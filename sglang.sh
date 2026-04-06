@@ -67,9 +67,8 @@ KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8_e4m3}"
 # Standard server binding (all presets)
 SERVER_ARGS=(--host 0.0.0.0 --port 8000)
 
-# Common to all Qwen3 presets: model name + tool calling
+# Common to all Qwen3 presets: tool calling
 QWEN3_ARGS=(
-    --served-model-name qwen3-coder-next
     --tool-call-parser qwen3_coder
 )
 
@@ -549,6 +548,7 @@ cmd_qwen35_nvfp4() {
         --disable-multimodal \
         "${spec_args[@]}" \
         --reasoning-parser qwen3 \
+        --served-model-name qwen35 \
         --trust-remote-code \
         "${SERVER_ARGS[@]}" \
         "${QWEN3_ARGS[@]}" \
@@ -588,6 +588,7 @@ cmd_qwen35_35b_nvfp4() {
         --disable-multimodal \
         "${spec_args[@]}" \
         --reasoning-parser qwen3 \
+        --served-model-name qwen35 \
         --trust-remote-code \
         "${SERVER_ARGS[@]}" \
         "${QWEN3_ARGS[@]}" \
@@ -609,6 +610,7 @@ cmd_qwen3_coder_next_nvfp4() {
         --context-length "${ctx}" \
         --attention-backend triton \
         --reasoning-parser qwen3 \
+        --served-model-name qwen3-coder-next \
         --trust-remote-code \
         "${SERVER_ARGS[@]}" \
         "${QWEN3_ARGS[@]}" \
@@ -632,6 +634,7 @@ cmd_qwen3_coder_next_fp8() {
         --chunked-prefill-size 8192 \
         --attention-backend triton \
         --reasoning-parser qwen3 \
+        --served-model-name qwen3-coder-next \
         --tool-call-parser qwen3_coder \
         --trust-remote-code \
         "${SERVER_ARGS[@]}" \
