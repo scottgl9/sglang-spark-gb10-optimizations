@@ -540,7 +540,7 @@ cmd_qwen35_nvfp4() {
         --mem-fraction-static 0.85 \
         --context-length "${CONTEXT_LENGTH}" \
         --max-running-requests 3 \
-        --attention-backend flashinfer \
+        --attention-backend fa4 \          # FA4 experiment: remove if unstable on SM121 (revert to flashinfer)
         --linear-attn-backend triton \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
