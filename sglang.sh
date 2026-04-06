@@ -279,7 +279,7 @@ cmd_build() {
 
         local SITE_PKG
         SITE_PKG=$(python -c "import site; print(site.getsitepackages()[0])")
-        local FP4_FILE="${SITE_PKG}/flashinfer/fp4_quantization.py"
+        local FP4_FILE="${SITE_PKG}/flashinfer/quantization/fp4_quantization.py"
         local CPP_EXT_FILE="${SITE_PKG}/flashinfer/jit/cpp_ext.py"
 
         # Fix 9d: fp4_quantization.py — register torch.library custom ops
@@ -540,7 +540,7 @@ cmd_qwen35_nvfp4() {
         --mem-fraction-static 0.85 \
         --context-length "${CONTEXT_LENGTH}" \
         --max-running-requests 3 \
-        --attention-backend fa4 \          # FA4 experiment: remove if unstable on SM121 (revert to flashinfer)
+        --attention-backend flashinfer \
         --linear-attn-backend triton \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
