@@ -18,7 +18,7 @@ These patches fix critical issues that prevent NVFP4-quantized models from runni
 | Model | Quantization | Decode Speed | MTP Accept Rate | MTP Accept Length |
 |-------|-------------|-------------|----------------|-------------------|
 | Qwen3.5-35B-A3B | NVFP4 + GDN post-quant | ~76 tok/s | ~97% | ~2.9 |
-| Qwen3.5-122B-A10B | NVFP4 + FP8 post-quant | ~37.9 tok/s | ~90% | ~2.7 |
+| Qwen3.5-122B-A10B | NVFP4 + FP8 post-quant | ~43-45 tok/s | ~90% | ~2.7 |
 
 ## Key Optimizations
 
