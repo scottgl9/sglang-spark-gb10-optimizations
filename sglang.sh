@@ -121,6 +121,9 @@ setup_runtime_env() {
     # Post-quantize lm_head from BF16 to FP8 (halves DRAM read cost, ~5% decode speedup)
     export SGLANG_QUANTIZE_LM_HEAD_FP8="${SGLANG_QUANTIZE_LM_HEAD_FP8:-1}"
 
+    # Post-quantize embed_tokens from BF16 to FP8 (saves ~0.6 GB for larger KV cache)
+    export SGLANG_QUANTIZE_EMBED_FP8="${SGLANG_QUANTIZE_EMBED_FP8:-1}"
+
     # Post-quantize MTP draft model layers to FP8 (halves MoE+fc bandwidth per draft step)
     # NOTE: On SM121, this is overridden to 0 below (Triton fp8e4nv dot not supported).
     # Save user's explicit value so SM121 override doesn't clobber it.
@@ -864,6 +867,8 @@ Environment overrides:
   DISABLE_MTP=1                  Disable speculative decoding (Qwen3.5-NVFP4)
   DISABLE_NGRAM=1                Disable NGRAM speculative decoding (minimax)
   ENABLE_EAGLE=1                 Enable EAGLE speculative decoding (mistral-small-4, experimental)
+  SGLANG_QUANTIZE_LM_HEAD_FP8=0 Disable FP8 lm_head quantization (default: 1)
+  SGLANG_QUANTIZE_EMBED_FP8=0   Disable FP8 embed_tokens quantization (default: 1)
   MINIMAX_MODEL=<path>           Override MiniMax model path
   MINIMAX_EAGLE3_MODEL=<path>    Override MiniMax EAGLE3 draft model path
 
