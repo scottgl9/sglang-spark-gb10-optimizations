@@ -10,6 +10,7 @@
 #   Qwen3-Coder-Next-NVFP4 [args] GadflyII Qwen3-Coder-Next NVFP4
 #   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next dense FP8
 #   minimax [args]                 MiniMax M2.5 REAP 139B NVFP4
+#   minimax-eagle3 [args]          MiniMax M2.5 REAP 172B NVFP4 + EAGLE3
 #   nemotron [args]                NVIDIA Nemotron-3-Super 120B-A12B NVFP4 + MTP
 #   mistral-small-4 [args]        Mistral-Small-4-119B NVFP4 + EAGLE
 #
@@ -34,6 +35,7 @@
 #   QWEN3_CODER_NVFP4_MODEL=GadflyII/...         ./sglang.sh Qwen3-Coder-Next-NVFP4
 #   QWEN3_CODER_MODEL=Qwen/Qwen3-Coder-Next-FP8  ./sglang.sh Qwen3-Coder-Next-FP8
 #   MINIMAX_MODEL=/path/to/model                  ./sglang.sh minimax
+#   MINIMAX_EAGLE3_MODEL=/path/to/eagle3           ./sglang.sh minimax-eagle3
 #   NEMOTRON_MODEL=/path/to/model                 ./sglang.sh nemotron
 #   MISTRAL_MODEL=/path/to/model                  ./sglang.sh mistral-small-4
 #   MISTRAL_EAGLE_MODEL=/path/to/eagle             ./sglang.sh mistral-small-4
@@ -682,6 +684,42 @@ cmd_minimax() {
         "$@"
 }
 
+cmd_minimax_eagle3() {
+    local model="${MINIMAX_MODEL:-saricles/MiniMax-M2.5-REAP-172B-A10B-NVFP4-GB10}"
+    local draft="${MINIMAX_EAGLE3_MODEL:-thoughtworks/MiniMax-M2.5-Eagle3}"
+    local ctx="${CONTEXT_LENGTH:-65536}"
+
+    info "Preset: MiniMax M2.5 REAP 172B NVFP4 + EAGLE3 speculative"
+    info "  Model : ${model}"
+    info "  Draft : ${draft}"
+    info "  CtxLen: ${ctx}"
+    info "  KV    : ${KV_CACHE_DTYPE}  (FP8 KV cache — halves KV bandwidth)"
+    info "  EPLB  : enabled (154 experts, topk=8)"
+
+    cmd_launch \
+        --model-path "${model}" \
+        --served-model-name MiniMax-M2.5 \
+        --quantization modelopt_fp4 \
+        --speculative-algorithm EAGLE3 \
+        --speculative-draft-model-path "${draft}" \
+        --speculative-num-steps 3 \
+        --speculative-eagle-topk 4 \
+        --speculative-num-draft-tokens 8 \
+        --mem-fraction-static 0.85 \
+        --max-running-requests 8 \
+        --context-length "${ctx}" \
+        --attention-backend triton \
+        --moe-runner-backend flashinfer_cutlass \
+        --enable-eplb \
+        --ep-num-redundant-experts 8 \
+        --reasoning-parser minimax \
+        --tool-call-parser minimax-m2 \
+        --trust-remote-code \
+        --disable-cuda-graph \
+        "${SERVER_ARGS[@]}" \
+        "$@"
+}
+
 cmd_nemotron() {
     # Default to the locally cached snapshot; override with NEMOTRON_MODEL=<path>
     local _snap="/home/scottgl/.cache/huggingface/hub/models--nvidia--NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/snapshots/bd90f177c8c69d8f3969c61e7e8f1afaba57ae61"
@@ -796,6 +834,7 @@ Commands:
   Qwen3-Coder-Next-NVFP4 [args] GadflyII/Qwen3-Coder-Next-NVFP4
   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next-FP8
   minimax [args]                 MiniMax M2.5 REAP 139B NVFP4
+  minimax-eagle3 [args]          MiniMax M2.5 REAP 172B NVFP4 + EAGLE3
   nemotron [args]                NVIDIA Nemotron-3-Super 120B-A12B NVFP4 + MTP
   mistral-small-4 [args]        Mistral-Small-4-119B NVFP4 + EAGLE
 
@@ -815,6 +854,7 @@ Model path overrides:
   QWEN3_CODER_NVFP4_MODEL=<path>  Override Qwen3-Coder-Next-NVFP4 model
   QWEN3_CODER_MODEL=<path>        Override Qwen3-Coder-Next-FP8 model
   MINIMAX_MODEL=<path>             Override MiniMax model path
+  MINIMAX_EAGLE3_MODEL=<path>      Override MiniMax EAGLE3 draft model path
   NEMOTRON_MODEL=<path>            Override Nemotron model path
   MISTRAL_MODEL=<path>             Override Mistral-Small-4 model path
   MISTRAL_EAGLE_MODEL=<path>       Override Mistral-Small-4 EAGLE draft path
@@ -825,6 +865,7 @@ Environment overrides:
   DISABLE_NGRAM=1                Disable NGRAM speculative decoding (minimax)
   ENABLE_EAGLE=1                 Enable EAGLE speculative decoding (mistral-small-4, experimental)
   MINIMAX_MODEL=<path>           Override MiniMax model path
+  MINIMAX_EAGLE3_MODEL=<path>    Override MiniMax EAGLE3 draft model path
 
 Examples:
   ./sglang.sh build
@@ -850,6 +891,7 @@ case "${CMD}" in
     Qwen3-Coder-Next-NVFP4|qwen3-coder-next-nvfp4) cmd_qwen3_coder_next_nvfp4 "$@" ;;
     Qwen3-Coder-Next-FP8|qwen3-coder-next-fp8) cmd_qwen3_coder_next_fp8 "$@" ;;
     minimax|MiniMax) cmd_minimax "$@" ;;
+    minimax-eagle3|MiniMax-Eagle3) cmd_minimax_eagle3 "$@" ;;
     nemotron|Nemotron|nemotron-3-super|Nemotron-3-Super) cmd_nemotron "$@" ;;
     mistral-small-4|Mistral-Small-4|mistral-small4) cmd_mistral_small4 "$@" ;;
     ""|help|-h|--help) usage ;;
