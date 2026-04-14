@@ -217,7 +217,7 @@ from the target model's lm_head to the draft model's lm_head.
 | Baseline (NVFP4 + GDN post-quant only) | ~36.9 |
 | + FP8 GDN layers (torch._scaled_mm — slow) | ~36.9 (no gain) |
 | + CUTLASS FP8 GDN layers | ~37.9 (+3%) |
-| + FP8 lm_head + MTP scale sharing | **~44.3 (+20%)** |
+| + FP8 lm_head + MTP scale sharing | **~43-45 (+17-22%)** |
 
 ---
 
