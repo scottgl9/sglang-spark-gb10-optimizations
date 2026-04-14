@@ -469,12 +469,16 @@ class SWATokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         return [
             self.full_attn_allocator.backup_state(),
             self.swa_attn_allocator.backup_state(),
+            self.full_to_swa_index_mapping.clone(),
         ]
 
     def restore_state(self, state):
-        assert len(state) == 2
+        assert len(state) == 3
         self.full_attn_allocator.restore_state(state[0])
         self.swa_attn_allocator.restore_state(state[1])
+        # Restore in-place to preserve shared references (attention backends
+        # hold a reference to full_to_swa_index_mapping via self._kvcache).
+        self.full_to_swa_index_mapping.copy_(state[2])
 
     def clear(self):
         self.swa_attn_allocator.clear()
