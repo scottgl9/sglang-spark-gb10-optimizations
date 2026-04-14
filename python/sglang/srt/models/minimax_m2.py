@@ -1114,7 +1114,10 @@ class MiniMaxM2Model(nn.Module):
         self.layers_to_capture = []
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        embeds = self.embed_tokens(input_ids)
+        if embeds.dtype == torch.float8_e4m3fn:
+            embeds = embeds.to(torch.bfloat16)
+        return embeds
 
     def forward(
         self,
@@ -1215,7 +1218,7 @@ class MiniMaxM2ForCausalLM(nn.Module):
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=add_prefix("lm_head", prefix),
             )
         else:
@@ -1387,6 +1390,16 @@ class MiniMaxM2ForCausalLM(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        if get_bool_env_var("SGLANG_QUANTIZE_EMBED_FP8"):
+            embed = self.model.embed_tokens
+            embed.weight.data = embed.weight.data.to(torch.float8_e4m3fn)
+            logger.info(
+                "SGLANG_QUANTIZE_EMBED_FP8=1: cast embed_tokens to FP8 "
+                "(saves ~%.0f MB)",
+                embed.weight.numel() / 1e6,
+            )
+
         return loaded_params
 
     @classmethod
