@@ -1393,12 +1393,20 @@ class MiniMaxM2ForCausalLM(nn.Module):
 
         if get_bool_env_var("SGLANG_QUANTIZE_EMBED_FP8"):
             embed = self.model.embed_tokens
-            embed.weight.data = embed.weight.data.to(torch.float8_e4m3fn)
-            logger.info(
-                "SGLANG_QUANTIZE_EMBED_FP8=1: cast embed_tokens to FP8 "
-                "(saves ~%.0f MB)",
-                embed.weight.numel() / 1e6,
-            )
+            # If the checkpoint already ships embed_tokens as FP8 (compressed-tensors
+            # group targeting re:.*embed_tokens$), don't re-cast — just log and move on.
+            if embed.weight.dtype == torch.float8_e4m3fn:
+                logger.info(
+                    "SGLANG_QUANTIZE_EMBED_FP8=1: embed_tokens is already FP8 "
+                    "in the checkpoint — no cast needed"
+                )
+            else:
+                embed.weight.data = embed.weight.data.to(torch.float8_e4m3fn)
+                logger.info(
+                    "SGLANG_QUANTIZE_EMBED_FP8=1: cast embed_tokens to FP8 "
+                    "(saves ~%.0f MB)",
+                    embed.weight.numel() / 1e6,
+                )
 
         return loaded_params
 

@@ -1455,6 +1455,12 @@ piecewise_cuda_graph_disabled_model_archs = [
     "GlmMoeDsaForCausalLM",
     "BailingMoeV2_5ForCausalLM",
     "LLaDAModelLM",
+    # MiniMaxM2 uses Marlin FP4 dense GEMM via a custom Function.__call__ that
+    # torch.compile's dynamo cannot trace (graph break on
+    # compressed_tensors_w4a4_nvfp4.apply_weights → gptq_marlin_gemm).
+    # Piecewise CUDA graph warmup fails with "Unsupported method call
+    # `__call__` of class `Function`".
+    "MiniMaxM2ForCausalLM",
 ]
 
 if external_mm_model_arch := envs.SGLANG_EXTERNAL_MM_MODEL_ARCH.get():
