@@ -284,6 +284,22 @@ def _convert_to_marlin_fp4(
     return True
 
 
+def _is_already_nvfp4_quantized(layer: torch.nn.Module) -> bool:
+    """Detect layers that are already NVFP4 (compressed-tensors layout) so we
+    don't try to post-quantize them.
+
+    A layer is considered already-quantized if it carries the compressed-tensors
+    NVFP4 tensor set (``weight_packed`` + ``weight_scale``) OR the Marlin FP4
+    post-quant tensor set (``marlin_qweight``). Either shape means the checkpoint
+    already ships this layer in FP4 and no BF16→FP4 work is needed.
+    """
+    if hasattr(layer, "weight_packed") and hasattr(layer, "weight_scale"):
+        return True
+    if hasattr(layer, "marlin_qweight"):
+        return True
+    return False
+
+
 def quantize_linear_bf16_to_nvfp4(layer: torch.nn.Module, layer_name: str) -> bool:
     """Quantize a single BF16 linear layer to NVFP4 in-place.
 
@@ -292,11 +308,27 @@ def quantize_linear_bf16_to_nvfp4(layer: torch.nn.Module, layer_name: str) -> bo
 
     Returns True if successful, False if skipped.
     """
+    # Compressed-tensors NVFP4 checkpoints ship these layers already quantized —
+    # silently skip instead of logging a scary "no weight attribute" warning.
+    if _is_already_nvfp4_quantized(layer):
+        logger.debug(
+            f"Skipping {layer_name}: already NVFP4 (compressed-tensors checkpoint)"
+        )
+        return False
+
     if not hasattr(layer, "weight"):
         logger.warning(f"Skipping {layer_name}: no weight attribute")
         return False
 
     weight = layer.weight.data
+    # FP8 per-tensor pre-quantized layers (e.g. lm_head in compressed-tensors
+    # float-quantized group): also already quantized — don't try to downgrade.
+    if weight.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+        logger.debug(
+            f"Skipping {layer_name}: weight dtype {weight.dtype} is FP8 "
+            f"(already pre-quantized in checkpoint)"
+        )
+        return False
     if weight.dtype not in (torch.bfloat16, torch.float16):
         logger.debug(f"Skipping {layer_name}: weight dtype {weight.dtype} is not BF16/FP16")
         return False
@@ -446,10 +478,17 @@ def apply_nvfp4_post_quant(
             return 0
 
     converted = 0
+    already_quantized = 0
     for name, module in model.named_modules():
         # Check if module name ends with any of the patterns
         module_short_name = name.rsplit(".", 1)[-1] if "." in name else name
         if module_short_name not in layer_patterns:
+            continue
+
+        # Compressed-tensors checkpoints ship matched layers already as NVFP4;
+        # count them and move on.
+        if _is_already_nvfp4_quantized(module):
+            already_quantized += 1
             continue
 
         if not hasattr(module, "weight"):
@@ -458,9 +497,14 @@ def apply_nvfp4_post_quant(
         if quantize_linear_bf16_to_nvfp4(module, name):
             converted += 1
 
+    if already_quantized > 0:
+        logger.info(
+            f"NVFP4 post-quantization: {already_quantized} layers matching "
+            f"patterns {layer_patterns} are already NVFP4 in the checkpoint — skipped"
+        )
     if converted > 0:
         logger.info(
-            f"NVFP4 post-quantization: converted {converted} layers "
+            f"NVFP4 post-quantization: converted {converted} BF16 layers "
             f"matching patterns {layer_patterns}"
         )
         # Flush freed BF16 tensors from the CUDA allocator.
