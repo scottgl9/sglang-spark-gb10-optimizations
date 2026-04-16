@@ -1,0 +1,148 @@
+# Dockerfile.gb10 — SGLang optimized for NVIDIA Spark GB10 (SM 12.1, aarch64)
+#
+# Build (on the GB10 device):
+#   docker build --platform linux/arm64 -f docker/Dockerfile.gb10 \
+#     -t ghcr.io/scottgl9/sglang-gb10:latest .
+#
+# Run:
+#   docker run --gpus 1 --ipc host \
+#     -v ~/.cache/huggingface:/root/.cache/huggingface \
+#     -v sglang-compilers:/root/.cache/sglang_compilers \
+#     -e HF_TOKEN=$HF_TOKEN -p 8000:8000 \
+#     ghcr.io/scottgl9/sglang-gb10:latest Qwen3.5-NVFP4
+#
+# Uses devel base (not runtime) because Triton/FlashInfer/DeepGEMM JIT-compile
+# CUDA kernels at runtime and need nvcc, headers, and libraries.
+
+FROM nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
+
+ARG SGL_KERNEL_VERSION=0.4.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CUDA_HOME=/usr/local/cuda
+
+# ── System dependencies ─────────────────────────────────────────────────────
+# Lean set: no RDMA/InfiniBand, GDRCopy, MPI, gRPC/protobuf, dev IDE tools
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+    # Python
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12-full \
+    python3.12-dev \
+    # Build tools (needed for JIT compilation at runtime)
+    build-essential \
+    ninja-build \
+    cmake \
+    # Core utilities
+    ca-certificates \
+    git \
+    curl \
+    wget \
+    # Runtime libs
+    libnuma1 \
+    ffmpeg \
+    locales \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
+    && update-alternatives --set python3 /usr/bin/python3.12 \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# ── Python / pip ─────────────────────────────────────────────────────────────
+RUN wget -q https://bootstrap.pypa.io/get-pip.py \
+    && python3 get-pip.py --break-system-packages \
+    && rm get-pip.py \
+    && python3 -m pip config set global.break-system-packages true
+
+# ── Locale ───────────────────────────────────────────────────────────────────
+RUN locale-gen en_US.UTF-8
+ENV LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+
+# ── PyTorch 2.9.1+cu130 ─────────────────────────────────────────────────────
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install \
+        torch==2.9.1+cu130 \
+        torchvision==0.24.1 \
+        torchaudio==2.9.1 \
+        --index-url https://download.pytorch.org/whl/cu130
+
+# ── SGLang from local source ────────────────────────────────────────────────
+WORKDIR /sgl-workspace/sglang
+COPY . /sgl-workspace/sglang
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -e "python[all]" \
+        --extra-index-url https://download.pytorch.org/whl/cu130
+
+# ── Triton 3.6.0 (SM 121a ptxas support) ────────────────────────────────────
+# sglang[all] pulls triton 3.5.1 which lacks ptxas-blackwell.
+# triton 3.6.0 ships ptxas that handles SM 100+/121a.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install triton==3.6.0
+
+# ── sgl-kernel cu130 wheel (SM_121a) ────────────────────────────────────────
+# PyPI sgl-kernel links against libnvrtc.so.12; this wheel links libnvrtc.so.13
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install --force-reinstall --no-deps \
+        https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sglang_kernel-${SGL_KERNEL_VERSION}+cu130-cp310-abi3-manylinux2014_aarch64.whl
+
+# ── CUDA 13 compatibility patches ───────────────────────────────────────────
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install nvidia-nccl-cu13==2.28.3 --force-reinstall --no-deps \
+    && python3 -m pip install nvidia-cudnn-cu13==9.16.0.29 --force-reinstall --no-deps \
+    && python3 -m pip install nvidia-cublas==13.1.0.3 --force-reinstall --no-deps \
+    && python3 -m pip install cuda-python==13.2.0 \
+    && python3 -m pip install "nvidia-cutlass-dsl>=4.4.1" "nvidia-cutlass-dsl-libs-base>=4.4.1" --force-reinstall --no-deps
+
+# ── Triton ptxas symlink ────────────────────────────────────────────────────
+# System ptxas from CUDA 13 handles SM 121a; Triton's bundled one does not
+RUN TRITON_BIN=/usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/bin \
+    && if [ -d "$TRITON_BIN" ]; then \
+        rm -f "$TRITON_BIN/ptxas" \
+        && ln -s /usr/local/cuda/bin/ptxas "$TRITON_BIN/ptxas"; \
+    fi
+
+# ── FlashInfer GB10 patches ─────────────────────────────────────────────────
+# Fix 9d: FP4 torch.library custom ops for piecewise CUDA graphs
+# Fix 10: ninja path resolution via shutil.which
+COPY docker/patches/fix_fp4_custom_ops.py /tmp/patches/fix_fp4_custom_ops.py
+COPY docker/patches/fix_ninja_path.py /tmp/patches/fix_ninja_path.py
+
+RUN SITE=/usr/local/lib/python3.12/dist-packages \
+    && FP4_FILE="$SITE/flashinfer/fp4_quantization.py" \
+    && CPP_EXT="$SITE/flashinfer/jit/cpp_ext.py" \
+    && if [ -f "$FP4_FILE" ]; then python3 /tmp/patches/fix_fp4_custom_ops.py "$FP4_FILE"; fi \
+    && if [ -f "$CPP_EXT" ]; then python3 /tmp/patches/fix_ninja_path.py "$CPP_EXT"; fi \
+    && rm -rf /tmp/patches
+
+# ── Download FlashInfer CUBIN cache ─────────────────────────────────────────
+RUN FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin || true
+
+# ── GB10-specific runtime environment ────────────────────────────────────────
+ENV CUDA_HOME=/usr/local/cuda \
+    PATH="${PATH}:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin" \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+    SAFETENSORS_FAST_GPU=1 \
+    SGLANG_QUANTIZE_LM_HEAD_FP8=1 \
+    SGLANG_MTP_FP8=0 \
+    SGLANG_ENABLE_JIT_DEEPGEMM=0 \
+    SGLANG_DISABLE_CUDNN_CHECK=1 \
+    MAX_JOBS=4 \
+    FLASHINFER_NVCC_THREADS=1 \
+    OMP_NUM_THREADS=8 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    KV_CACHE_DTYPE=fp8_e4m3
+
+# ── Entrypoint ───────────────────────────────────────────────────────────────
+COPY docker/entrypoint-gb10.sh /entrypoint-gb10.sh
+RUN chmod +x /entrypoint-gb10.sh
+
+EXPOSE 8000
+
+ENTRYPOINT ["/entrypoint-gb10.sh"]
+CMD ["Qwen3.5-NVFP4"]

@@ -1,0 +1,39 @@
+# Docker Compose for SGLang on NVIDIA Spark GB10
+#
+# Usage:
+#   docker compose -f docker/compose-gb10.yaml up
+#   PRESET=minimax docker compose -f docker/compose-gb10.yaml up
+#   HF_TOKEN=hf_... docker compose -f docker/compose-gb10.yaml up
+
+services:
+  sglang-gb10:
+    image: ghcr.io/scottgl9/sglang-gb10:latest
+    container_name: sglang-gb10
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+      - sglang-compiler-cache:/root/.cache/sglang_compilers
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - CONTEXT_LENGTH=${CONTEXT_LENGTH:-65536}
+      - KV_CACHE_DTYPE=${KV_CACHE_DTYPE:-fp8_e4m3}
+    ports:
+      - "8000:8000"
+    ipc: host
+    restart: unless-stopped
+    command: ${PRESET:-Qwen3.5-NVFP4}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  sglang-compiler-cache:
