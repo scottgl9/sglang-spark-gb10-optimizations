@@ -9,8 +9,7 @@
 #   Qwen3.5-35B-NVFP4 [args]      Sehyo/Qwen3.5-35B-A3B-NVFP4 + speculative decoding
 #   Qwen3-Coder-Next-NVFP4 [args] GadflyII Qwen3-Coder-Next NVFP4
 #   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next dense FP8
-#   minimax [args]                 MiniMax M2.5 REAP 139B NVFP4
-#   minimax-eagle3 [args]          MiniMax M2.5 REAP 172B NVFP4 + EAGLE3
+#   minimax-m27 [args]             MiniMax M2.7 REAP 172B NVFP4-GB10 (compressed-tensors)
 #   nemotron [args]                NVIDIA Nemotron-3-Super 120B-A12B NVFP4 + MTP
 #   mistral-small-4 [args]        Mistral-Small-4-119B NVFP4 + EAGLE
 #
@@ -34,8 +33,7 @@
 #   QWEN35_35B_MODEL=Sehyo/...                   ./sglang.sh Qwen3.5-35B-NVFP4
 #   QWEN3_CODER_NVFP4_MODEL=GadflyII/...         ./sglang.sh Qwen3-Coder-Next-NVFP4
 #   QWEN3_CODER_MODEL=Qwen/Qwen3-Coder-Next-FP8  ./sglang.sh Qwen3-Coder-Next-FP8
-#   MINIMAX_MODEL=/path/to/model                  ./sglang.sh minimax
-#   MINIMAX_EAGLE3_MODEL=/path/to/eagle3           ./sglang.sh minimax-eagle3
+#   MINIMAX_MODEL=/path/to/model                  ./sglang.sh minimax-m27
 #   NEMOTRON_MODEL=/path/to/model                 ./sglang.sh nemotron
 #   MISTRAL_MODEL=/path/to/model                  ./sglang.sh mistral-small-4
 #   MISTRAL_EAGLE_MODEL=/path/to/eagle             ./sglang.sh mistral-small-4
@@ -43,7 +41,6 @@
 # Key environment overrides:
 #   CONTEXT_LENGTH             Context window tokens (default: 65536)
 #   DISABLE_MTP=1              Disable speculative decoding for Qwen3.5-NVFP4 / nemotron
-#   DISABLE_NGRAM=1            Disable NGRAM speculative decoding for minimax
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -643,82 +640,39 @@ cmd_qwen3_coder_next_fp8() {
         "$@"
 }
 
-cmd_minimax() {
-    local model="${MINIMAX_MODEL:-saricles/MiniMax-M2.5-REAP-139B-A10B-NVFP4-GB10}"
+cmd_minimax_m27() {
+    # MiniMax M2.7-REAP 172B NVFP4-GB10 (compressed-tensors format).
+    # Produced by https://github.com/scottgl9/sglang-spark-gb10-optimizations/
+    # tree/main/minimax_reap_reduction (convert.py) from catplusplus/MiniMax-M2.7-REAP-172B-A10B-NVFP4.
+    #
+    # Measured on Spark GB10 (SM121), batch=1:
+    #   decode TPS ≈ 26 tok/s
+    # CUDA graphs remain disabled: torch.compile can't trace the custom
+    # Function.__call__ in the Marlin FP4 dense GEMM (SM121 path). Re-enable
+    # once that graph break is fixed.
+    local model="${MINIMAX_MODEL:-scottgl/MiniMax-M2.7-REAP-172B-A10B-NVFP4-GB10}"
     local ctx="${CONTEXT_LENGTH:-65536}"
 
-    # Speculative decoding via prompt-lookup (n-gram)
-    # Requires no draft model — matches token n-grams from prompt/context.
-    # Best acceptance on code/repetitive text (~1.3-1.8×); still useful for chat.
-    # Disable with: DISABLE_NGRAM=1 ./sglang.sh minimax
-    local spec_args=()
-    if [[ "${DISABLE_NGRAM:-}" != "1" ]]; then
-        spec_args=(
-            --speculative-algorithm NGRAM
-            --speculative-num-draft-tokens 5
-            --speculative-ngram-max-match-window-size 16
-        )
-        info "Preset: MiniMax M2.5 REAP 139B NVFP4 + NGRAM speculative"
-    else
-        info "Preset: MiniMax M2.5 REAP 139B NVFP4 (NGRAM disabled)"
-    fi
+    info "Preset: MiniMax M2.7 REAP 172B NVFP4-GB10 (compressed-tensors)"
     info "  Model : ${model}"
     info "  CtxLen: ${ctx}"
     info "  KV    : ${KV_CACHE_DTYPE}  (FP8 KV cache — halves KV bandwidth)"
-    info "  EPLB  : enabled (154 experts, topk=8)"
+    info "  Note  : CUDA graphs disabled (Marlin FP4 torch.compile graph break); expect ~26 tok/s"
 
     cmd_launch \
         --model-path "${model}" \
-        --served-model-name MiniMax-M2.5 \
-        --quantization modelopt_fp4 \
-        --mem-fraction-static 0.88 \
-        --max-running-requests 8 \
+        --served-model-name minimax27 \
+        --quantization compressed-tensors \
+        --mem-fraction-static 0.90 \
+        --max-running-requests 2 \
         --context-length "${ctx}" \
+        --chunked-prefill-size 16384 \
         --attention-backend triton \
-        --moe-runner-backend flashinfer_cutlass \
-        --enable-eplb \
-        --ep-num-redundant-experts 8 \
         --reasoning-parser minimax \
         --tool-call-parser minimax-m2 \
         --trust-remote-code \
         --disable-cuda-graph \
-        "${spec_args[@]}" \
-        "${SERVER_ARGS[@]}" \
-        "$@"
-}
-
-cmd_minimax_eagle3() {
-    local model="${MINIMAX_MODEL:-saricles/MiniMax-M2.5-REAP-172B-A10B-NVFP4-GB10}"
-    local draft="${MINIMAX_EAGLE3_MODEL:-thoughtworks/MiniMax-M2.5-Eagle3}"
-    local ctx="${CONTEXT_LENGTH:-65536}"
-
-    info "Preset: MiniMax M2.5 REAP 172B NVFP4 + EAGLE3 speculative"
-    info "  Model : ${model}"
-    info "  Draft : ${draft}"
-    info "  CtxLen: ${ctx}"
-    info "  KV    : ${KV_CACHE_DTYPE}  (FP8 KV cache — halves KV bandwidth)"
-    info "  EPLB  : enabled (154 experts, topk=8)"
-
-    cmd_launch \
-        --model-path "${model}" \
-        --served-model-name MiniMax-M2.5 \
-        --quantization modelopt_fp4 \
-        --speculative-algorithm EAGLE3 \
-        --speculative-draft-model-path "${draft}" \
-        --speculative-num-steps 3 \
-        --speculative-eagle-topk 4 \
-        --speculative-num-draft-tokens 8 \
-        --mem-fraction-static 0.85 \
-        --max-running-requests 8 \
-        --context-length "${ctx}" \
-        --attention-backend triton \
-        --moe-runner-backend flashinfer_cutlass \
-        --enable-eplb \
-        --ep-num-redundant-experts 8 \
-        --reasoning-parser minimax \
-        --tool-call-parser minimax-m2 \
-        --trust-remote-code \
-        --disable-cuda-graph \
+        --disable-piecewise-cuda-graph \
         "${SERVER_ARGS[@]}" \
         "$@"
 }
@@ -836,8 +790,7 @@ Commands:
   Qwen3.5-35B-NVFP4 [args]      Sehyo/Qwen3.5-35B-A3B-NVFP4, speculative decoding
   Qwen3-Coder-Next-NVFP4 [args] GadflyII/Qwen3-Coder-Next-NVFP4
   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next-FP8
-  minimax [args]                 MiniMax M2.5 REAP 139B NVFP4
-  minimax-eagle3 [args]          MiniMax M2.5 REAP 172B NVFP4 + EAGLE3
+  minimax-m27 [args]             MiniMax M2.7 REAP 172B NVFP4-GB10 (compressed-tensors)
   nemotron [args]                NVIDIA Nemotron-3-Super 120B-A12B NVFP4 + MTP
   mistral-small-4 [args]        Mistral-Small-4-119B NVFP4 + EAGLE
 
@@ -857,7 +810,6 @@ Model path overrides:
   QWEN3_CODER_NVFP4_MODEL=<path>  Override Qwen3-Coder-Next-NVFP4 model
   QWEN3_CODER_MODEL=<path>        Override Qwen3-Coder-Next-FP8 model
   MINIMAX_MODEL=<path>             Override MiniMax model path
-  MINIMAX_EAGLE3_MODEL=<path>      Override MiniMax EAGLE3 draft model path
   NEMOTRON_MODEL=<path>            Override Nemotron model path
   MISTRAL_MODEL=<path>             Override Mistral-Small-4 model path
   MISTRAL_EAGLE_MODEL=<path>       Override Mistral-Small-4 EAGLE draft path
@@ -865,20 +817,17 @@ Model path overrides:
 Environment overrides:
   CONTEXT_LENGTH=N               Context window tokens (default: 65536)
   DISABLE_MTP=1                  Disable speculative decoding (Qwen3.5-NVFP4)
-  DISABLE_NGRAM=1                Disable NGRAM speculative decoding (minimax)
   ENABLE_EAGLE=1                 Enable EAGLE speculative decoding (mistral-small-4, experimental)
   SGLANG_QUANTIZE_LM_HEAD_FP8=0 Disable FP8 lm_head quantization (default: 1)
   SGLANG_QUANTIZE_EMBED_FP8=0   Disable FP8 embed_tokens quantization (default: 1)
   MINIMAX_MODEL=<path>           Override MiniMax model path
-  MINIMAX_EAGLE3_MODEL=<path>    Override MiniMax EAGLE3 draft model path
 
 Examples:
   ./sglang.sh build
   ./sglang.sh Qwen3.5-NVFP4
   CONTEXT_LENGTH=32768 ./sglang.sh Qwen3.5-NVFP4
-  ./sglang.sh minimax
-  CONTEXT_LENGTH=32768 ./sglang.sh minimax
-  DISABLE_NGRAM=1 ./sglang.sh minimax    # NGRAM off, baseline
+  ./sglang.sh minimax-m27                        # MiniMax M2.7 (compressed-tensors NVFP4)
+  CONTEXT_LENGTH=4096 ./sglang.sh minimax-m27    # tight-memory mode for 128 GB hosts
 
 EOF
 }
@@ -895,8 +844,7 @@ case "${CMD}" in
     Qwen3.5-35B-NVFP4|qwen3.5-35b-nvfp4|qwen35-35b-nvfp4) cmd_qwen35_35b_nvfp4 "$@" ;;
     Qwen3-Coder-Next-NVFP4|qwen3-coder-next-nvfp4) cmd_qwen3_coder_next_nvfp4 "$@" ;;
     Qwen3-Coder-Next-FP8|qwen3-coder-next-fp8) cmd_qwen3_coder_next_fp8 "$@" ;;
-    minimax|MiniMax) cmd_minimax "$@" ;;
-    minimax-eagle3|MiniMax-Eagle3) cmd_minimax_eagle3 "$@" ;;
+    minimax-m27|MiniMax-M27|minimax-m2.7|MiniMax-M2.7) cmd_minimax_m27 "$@" ;;
     nemotron|Nemotron|nemotron-3-super|Nemotron-3-Super) cmd_nemotron "$@" ;;
     mistral-small-4|Mistral-Small-4|mistral-small4) cmd_mistral_small4 "$@" ;;
     ""|help|-h|--help) usage ;;
