@@ -645,11 +645,17 @@ cmd_minimax_m27() {
     # Produced by https://github.com/scottgl9/sglang-spark-gb10-optimizations/
     # tree/main/minimax_reap_reduction (convert.py) from catplusplus/MiniMax-M2.7-REAP-172B-A10B-NVFP4.
     #
-    # Measured on Spark GB10 (SM121), batch=1:
-    #   decode TPS ≈ 26 tok/s
-    # CUDA graphs remain disabled: torch.compile can't trace the custom
-    # Function.__call__ in the Marlin FP4 dense GEMM (SM121 path). Re-enable
-    # once that graph break is fixed.
+    # Measured on Spark GB10 (SM121), batch=1, with CUDA graphs enabled:
+    #   4K  decode ≈ 16.9 tok/s
+    #   32K decode ≈ 12.8 tok/s
+    #
+    # The previous `--disable-cuda-graph` flag was attributed to a Marlin FP4
+    # `torch.compile` graph break (see model_config.py piecewise-disabled list),
+    # but the actual capture blocker on our stack was the MoE NaN-fallback in
+    # python/sglang/srt/models/minimax_m2.py — `hidden_states.isnan().any()`
+    # forces a D2H sync during `cudaStreamCapture` → cudaErrorStreamCaptureUnsupported.
+    # Replacing the conditional with an unconditional `torch.where` lets capture
+    # succeed. Piecewise CUDA graphs stay disabled per model_config.py.
     local model="${MINIMAX_MODEL:-scottgl/MiniMax-M2.7-REAP-172B-A10B-NVFP4-GB10}"
     local ctx="${CONTEXT_LENGTH:-65536}"
 
@@ -657,7 +663,7 @@ cmd_minimax_m27() {
     info "  Model : ${model}"
     info "  CtxLen: ${ctx}"
     info "  KV    : ${KV_CACHE_DTYPE}  (FP8 KV cache — halves KV bandwidth)"
-    info "  Note  : CUDA graphs disabled (Marlin FP4 torch.compile graph break); expect ~26 tok/s"
+    info "  Note  : CUDA graphs enabled (regular only; piecewise disabled in model_config)"
 
     cmd_launch \
         --model-path "${model}" \
@@ -671,7 +677,6 @@ cmd_minimax_m27() {
         --reasoning-parser minimax \
         --tool-call-parser minimax-m2 \
         --trust-remote-code \
-        --disable-cuda-graph \
         --disable-piecewise-cuda-graph \
         "${SERVER_ARGS[@]}" \
         "$@"
