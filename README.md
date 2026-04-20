@@ -71,9 +71,10 @@ Key files:
 | Qwen3.5-35B-A3B-NVFP4 | `./sglang.sh Qwen3.5-35B-NVFP4` | MTP, GDN post-quant |
 | Mistral-Small-4-119B NVFP4 | `./sglang.sh mistral-small-4` | Triton attention, EAGLE disabled by default |
 | Nemotron-3-Super-120B-A12B-NVFP4 | `./sglang.sh nemotron` | FP8 post-quant, Triton MoE |
-| MiniMax M2.5 | `./sglang.sh minimax` | NGRAM speculation |
-| Qwen3-Coder-Next NVFP4 | `./sglang.sh Qwen3-Coder-Next-NVFP4` | |
-| Qwen3-Coder-Next FP8 | `./sglang.sh Qwen3-Coder-Next-FP8` | Dense FP8 |
+| MiniMax M2.5 REAP 139B NVFP4 | `./sglang.sh minimax` | NGRAM speculation |
+| MiniMax M2.5 REAP 172B NVFP4 | `./sglang.sh minimax-eagle3` | EAGLE3 speculative decoding |
+| Qwen3-Coder-Next NVFP4 | `./sglang.sh Qwen3-Coder-Next-NVFP4` | MoE |
+| Qwen3-Coder-Next FP8 | `./sglang.sh Qwen3-Coder-Next-FP8` | MoE |
 
 ## Quick Start
 
@@ -160,7 +161,7 @@ Model paths can be overridden with `QWEN35_MODEL`, `NEMOTRON_MODEL`, `MISTRAL_MO
 
 ## Upstream
 
-Based on [sgl-project/sglang](https://github.com/sgl-project/sglang) main branch. This fork contains 227 commits of GB10-specific optimizations on top of upstream.
+Based on [sgl-project/sglang](https://github.com/sgl-project/sglang) main branch. This fork contains 389 commits of GB10-specific optimizations on top of upstream.
 
 ## License
 
