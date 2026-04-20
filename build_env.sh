@@ -122,7 +122,8 @@ fi
 # The pre-built cu130 wheel is identical in functionality and includes SM_121a.
 if [[ $SKIP_SGL_KERNEL -eq 0 ]]; then
     log "--- Step 4: Installing sglang-kernel cu130 wheel (SM_121a) ---"
-    SGLANG_KERNEL_WHL="https://github.com/sgl-project/whl/releases/download/v0.4.0/sglang_kernel-0.4.0%2Bcu130-cp310-abi3-manylinux2014_aarch64.whl"
+    ARCH="$(uname -m)"
+    SGLANG_KERNEL_WHL="https://github.com/sgl-project/whl/releases/download/v0.4.0/sglang_kernel-0.4.0%2Bcu130-cp310-abi3-manylinux2014_${ARCH}.whl"
     pip install --force-reinstall --no-deps "$SGLANG_KERNEL_WHL"
     log "sglang-kernel installed: $(python -c 'import sgl_kernel; print("OK")')"
 else
