@@ -112,6 +112,11 @@ _is_amx_available = cpu_has_amx_support()
 cached_get_processor = lru_cache(get_processor)
 
 
+def _is_baked_gb10_checkpoint(model) -> bool:
+    config = getattr(model, "config", None)
+    return bool(config is not None and getattr(config, "gb10_baked_checkpoint", False))
+
+
 class Qwen3_5GatedDeltaNet(nn.Module):
     def __init__(
         self,
@@ -1510,26 +1515,31 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-        # Post-quantize large BF16 GDN layers to NVFP4 on SM120/SM121
-        # SM121 uses Marlin FP4 dense GEMM (CUTLASS broken on GB10)
-        if is_sm120_supported():
-            from sglang.srt.layers.quantization.nvfp4_post_quant import (
-                apply_nvfp4_post_quant,
+        if _is_baked_gb10_checkpoint(self):
+            logger.info(
+                "Detected baked GB10 checkpoint, skipping Qwen3.5 post-load quantization"
+            )
+        else:
+            # Post-quantize large BF16 GDN layers to NVFP4 on SM120/SM121
+            # SM121 uses Marlin FP4 dense GEMM (CUTLASS broken on GB10)
+            if is_sm120_supported():
+                from sglang.srt.layers.quantization.nvfp4_post_quant import (
+                    apply_nvfp4_post_quant,
+                )
+
+                apply_nvfp4_post_quant(self, layer_patterns=["in_proj_qkv", "in_proj_z"])
+
+            # Post-quantize remaining BF16 GDN layers to FP8
+            # These are in_proj_a, in_proj_b, out_proj — small but numerous (36 each)
+            # and account for ~33% of decode GPU compute time at BF16.
+            # FP8 halves bandwidth with excellent accuracy (cos_sim>0.999, SNR=31.5dB).
+            from sglang.srt.layers.quantization.fp8_post_quant import (
+                apply_fp8_post_quant_linear_base,
             )
 
-            apply_nvfp4_post_quant(self, layer_patterns=["in_proj_qkv", "in_proj_z"])
-
-        # Post-quantize remaining BF16 GDN layers to FP8
-        # These are in_proj_a, in_proj_b, out_proj — small but numerous (36 each)
-        # and account for ~33% of decode GPU compute time at BF16.
-        # FP8 halves bandwidth with excellent accuracy (cos_sim>0.999, SNR=31.5dB).
-        from sglang.srt.layers.quantization.fp8_post_quant import (
-            apply_fp8_post_quant_linear_base,
-        )
-
-        apply_fp8_post_quant_linear_base(
-            self, layer_patterns=["in_proj_a", "in_proj_b", "out_proj"]
-        )
+            apply_fp8_post_quant_linear_base(
+                self, layer_patterns=["in_proj_a", "in_proj_b", "out_proj"]
+            )
 
         return loaded_params
 
@@ -1912,23 +1922,28 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             }
         )
 
-        # Post-quantize large BF16 GDN layers to NVFP4 on SM120/SM121
-        # SM121 uses Marlin FP4 dense GEMM (CUTLASS broken on GB10)
-        if is_sm120_supported():
-            from sglang.srt.layers.quantization.nvfp4_post_quant import (
-                apply_nvfp4_post_quant,
+        if _is_baked_gb10_checkpoint(self):
+            logger.info(
+                "Detected baked GB10 checkpoint, skipping Qwen3.5 MoE post-load quantization"
+            )
+        else:
+            # Post-quantize large BF16 GDN layers to NVFP4 on SM120/SM121
+            # SM121 uses Marlin FP4 dense GEMM (CUTLASS broken on GB10)
+            if is_sm120_supported():
+                from sglang.srt.layers.quantization.nvfp4_post_quant import (
+                    apply_nvfp4_post_quant,
+                )
+
+                apply_nvfp4_post_quant(self, layer_patterns=["in_proj_qkv", "in_proj_z"])
+
+            # Post-quantize remaining BF16 GDN layers to FP8
+            from sglang.srt.layers.quantization.fp8_post_quant import (
+                apply_fp8_post_quant_linear_base,
             )
 
-            apply_nvfp4_post_quant(self, layer_patterns=["in_proj_qkv", "in_proj_z"])
-
-        # Post-quantize remaining BF16 GDN layers to FP8
-        from sglang.srt.layers.quantization.fp8_post_quant import (
-            apply_fp8_post_quant_linear_base,
-        )
-
-        apply_fp8_post_quant_linear_base(
-            self, layer_patterns=["in_proj_a", "in_proj_b", "out_proj"]
-        )
+            apply_fp8_post_quant_linear_base(
+                self, layer_patterns=["in_proj_a", "in_proj_b", "out_proj"]
+            )
 
         self._routed_experts_weights_of_layer = LazyValue(
             lambda: {
