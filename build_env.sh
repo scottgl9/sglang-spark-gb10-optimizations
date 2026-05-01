@@ -122,7 +122,7 @@ fi
 # The pre-built cu130 wheel is identical in functionality and includes SM_121a.
 if [[ $SKIP_SGL_KERNEL -eq 0 ]]; then
     log "--- Step 4: Installing sglang-kernel cu130 wheel (SM_121a) ---"
-    SGLANG_KERNEL_WHL="https://github.com/sgl-project/whl/releases/download/v0.4.0/sglang_kernel-0.4.0%2Bcu130-cp310-abi3-manylinux2014_aarch64.whl"
+    SGLANG_KERNEL_WHL="https://github.com/sgl-project/whl/releases/download/v0.4.1.post1/sglang_kernel-0.4.1.post1%2Bcu130-cp310-abi3-manylinux2014_aarch64.whl"
     pip install --force-reinstall --no-deps "$SGLANG_KERNEL_WHL"
     log "sglang-kernel installed: $(python -c 'import sgl_kernel; print("OK")')"
 else
@@ -151,7 +151,9 @@ if [[ $SKIP_FIXES -eq 0 ]]; then
     SITE_PKG=$(python -c "import site; print(site.getsitepackages()[0])")
     log "site-packages: $SITE_PKG"
 
-    FP4_FILE="$SITE_PKG/flashinfer/fp4_quantization.py"
+    FP4_FILE="$SITE_PKG/flashinfer/quantization/fp4_quantization.py"
+    # Fallback: older flashinfer versions kept the file at the top-level path
+    [[ -f "$FP4_FILE" ]] || FP4_FILE="$SITE_PKG/flashinfer/fp4_quantization.py"
     CPP_EXT_FILE="$SITE_PKG/flashinfer/jit/cpp_ext.py"
 
     # Fix 9d: fp4_quantization.py — register torch.library custom ops
