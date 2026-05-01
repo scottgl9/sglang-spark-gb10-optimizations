@@ -522,9 +522,9 @@ cmd_qwen35_nvfp4() {
     if [[ "${DISABLE_MTP:-}" != "1" ]]; then
         spec_args=(
             --speculative-algorithm NEXTN
-            --speculative-num-steps 3
+            --speculative-num-steps 4
             --speculative-eagle-topk 1
-            --speculative-num-draft-tokens 4
+            --speculative-num-draft-tokens 5
             --mamba-scheduler-strategy extra_buffer
         )
         export SGLANG_ENABLE_SPEC_V2=1
