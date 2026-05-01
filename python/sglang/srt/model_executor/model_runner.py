@@ -276,6 +276,15 @@ UNBALANCED_MODEL_LOADING_TIMEOUT_S = 480  # leave more time for post data proces
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_export_model(model: nn.Module) -> nn.Module:
+    """Best-effort unwrap for export to a HF-compatible module."""
+    for attr in ("hf_model", "model"):
+        candidate = getattr(model, attr, None)
+        if isinstance(candidate, nn.Module):
+            return candidate
+    return model
+
+
 def resolve_language_model(model: nn.Module) -> nn.Module:
     model_cls_name = model.__class__.__name__
     if model_cls_name == "Qwen3OmniMoeForConditionalGeneration":
@@ -1492,6 +1501,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger,
         )
 
+        if self.server_args.export_baked_checkpoint:
+            self._export_baked_checkpoint()
+
         if self.server_args.elastic_ep_backend == "mooncake":
             # Mooncake does not support `monitored_barrier`
             dist.barrier(group=get_tp_group().cpu_group)
@@ -1509,6 +1521,46 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 raise ValueError(
                     f"TP rank {self.tp_rank} could finish the model loading, but there are other ranks that didn't finish loading. It is likely due to unexpected failures (e.g., OOM) or a slow node."
                 ) from None
+
+    def _export_baked_checkpoint(self):
+        export_dir = self.server_args.export_baked_checkpoint
+        if not export_dir:
+            return
+
+        export_dir = os.path.abspath(export_dir)
+        os.makedirs(export_dir, exist_ok=True)
+        logger.info("Exporting baked checkpoint to %s", export_dir)
+
+        export_model = _unwrap_export_model(self.model)
+        if hasattr(export_model, "config") and export_model.config is not None:
+            setattr(export_model.config, "gb10_baked_checkpoint", True)
+            setattr(export_model.config, "gb10_baked_post_quant", True)
+            setattr(export_model.config, "gb10_baked_fp8_lm_head", True)
+            setattr(export_model.config, "gb10_baked_source_model", self.server_args.model_path)
+
+        save_kwargs = {
+            "safe_serialization": True,
+            "max_shard_size": "5GB",
+        }
+        if hasattr(export_model, "save_pretrained"):
+            export_model.save_pretrained(export_dir, **save_kwargs)
+        else:
+            raise RuntimeError(
+                f"Model type {type(export_model).__name__} does not support save_pretrained() for baked checkpoint export"
+            )
+
+        tokenizer = getattr(self, "processor", None) or getattr(self, "tokenizer", None)
+        if tokenizer is not None and hasattr(tokenizer, "save_pretrained"):
+            tokenizer.save_pretrained(export_dir)
+
+        if hasattr(self.model_config, "hf_config") and self.model_config.hf_config is not None:
+            self.model_config.hf_config.save_pretrained(export_dir)
+
+        logger.info(
+            "Finished exporting baked checkpoint to %s. This checkpoint should be loaded with SGLANG_QUANTIZE_LM_HEAD_FP8=0.",
+            export_dir,
+        )
+        raise SystemExit(0)
 
     def update_expert_location(
         self,

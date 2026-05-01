@@ -364,6 +364,7 @@ class ServerArgs:
     modelopt_checkpoint_restore_path: Optional[str] = None
     modelopt_checkpoint_save_path: Optional[str] = None
     modelopt_export_path: Optional[str] = None
+    export_baked_checkpoint: Optional[str] = None
     quantize_and_serve: bool = False
     rl_quant_profile: Optional[str] = None  # For flash_rl load format
 
@@ -4331,6 +4332,12 @@ class ServerArgs:
             "--trust-remote-code",
             action="store_true",
             help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
+        )
+        parser.add_argument(
+            "--export-baked-checkpoint",
+            type=str,
+            default=ServerArgs.export_baked_checkpoint,
+            help="Export the fully loaded post-quantized model as a Hugging Face safetensors checkpoint to this directory and exit.",
         )
         parser.add_argument(
             "--context-length",
