@@ -46,6 +46,27 @@ log "=== SGLang GB10 build started ==="
 log "Script dir: $SCRIPT_DIR"
 log "Log: $LOG"
 
+# Ensure Rust/cargo is on PATH (needed to build sglang's Rust gRPC component)
+if [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck source=/dev/null
+    source "$HOME/.cargo/env"
+    log "Rust: $(rustc --version 2>/dev/null || echo 'not found after sourcing ~/.cargo/env')"
+elif command -v rustc &>/dev/null; then
+    log "Rust: $(rustc --version)"
+else
+    log "WARNING: Rust compiler not found. Installing via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+    source "$HOME/.cargo/env"
+    log "Rust: $(rustc --version)"
+fi
+
+# Ensure protoc is available (needed for sglang-grpc Rust build)
+if ! command -v protoc &>/dev/null; then
+    log "WARNING: protoc not found. Installing protobuf-compiler..."
+    sudo apt-get install -y protobuf-compiler
+fi
+log "protoc: $(protoc --version 2>/dev/null || echo 'not found')"
+
 # Verify we're in the right directory
 [[ -f "$SCRIPT_DIR/python/sglang/__init__.py" ]] || die "Run from ~/sandbox/sglang (sglang source root)"
 
