@@ -522,9 +522,9 @@ cmd_qwen35_nvfp4() {
     if [[ "${DISABLE_MTP:-}" != "1" ]]; then
         spec_args=(
             --speculative-algorithm NEXTN
-            --speculative-num-steps 2
+            --speculative-num-steps 3
             --speculative-eagle-topk 1
-            --speculative-num-draft-tokens 2
+            --speculative-num-draft-tokens 4
             --mamba-scheduler-strategy extra_buffer
         )
         export SGLANG_ENABLE_SPEC_V2=1
@@ -539,10 +539,10 @@ cmd_qwen35_nvfp4() {
         --model-path "${model}" \
         --quantization compressed-tensors \
         --speculative-draft-model-quantization compressed-tensors \
-        --mem-fraction-static 0.85 \
+        --mem-fraction-static 0.87 \
         --context-length "${CONTEXT_LENGTH}" \
         --max-running-requests 3 \
-        --attention-backend fa4 \          # FA4 experiment: remove if unstable on SM121 (revert to flashinfer)
+        --attention-backend flashinfer \
         --linear-attn-backend triton \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
@@ -554,6 +554,7 @@ cmd_qwen35_nvfp4() {
         --trust-remote-code \
         "${SERVER_ARGS[@]}" \
         "${QWEN3_ARGS[@]}" \
+        --served-model-name qwen35 \
         "$@"
 }
 
