@@ -547,6 +547,7 @@ cmd_qwen35_nvfp4() {
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
         --mamba-full-memory-ratio auto \
+        --mamba-ssm-dtype bfloat16 \
         --disable-piecewise-cuda-graph \
         --disable-multimodal \
         "${spec_args[@]}" \
