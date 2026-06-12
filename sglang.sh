@@ -777,6 +777,43 @@ cmd_mistral_small4() {
         "$@"
 }
 
+cmd_step3p7_flash() {
+    local _snap="/home/scottgl/.cache/huggingface/hub/models--0xSero--Step-3.7-Flash-173B/snapshots/2345bd160acfe19ac6326d1a08e52e9cfe4a367e"
+    local model="${STEP_MODEL:-${_snap}}"
+
+    local spec_args=()
+    if [[ "${DISABLE_MTP:-}" != "1" ]]; then
+        spec_args=(
+            --speculative-algorithm NEXTN
+            --speculative-num-steps 3
+            --speculative-eagle-topk 1
+            --speculative-num-draft-tokens 4
+        )
+        export SGLANG_ENABLE_SPEC_V2=1
+        info "Preset: Step-3.7-Flash-173B (NVFP4, MTP NEXTN 3-step)"
+    else
+        info "Preset: Step-3.7-Flash-173B (NVFP4, MTP DISABLED)"
+    fi
+    info "  Model : ${model}"
+    info "  CtxLen: ${CONTEXT_LENGTH}"
+
+    cmd_launch \
+        --model-path "${model}" \
+        --served-model-name step3p7-flash \
+        --quantization compressed-tensors \
+        --mem-fraction-static 0.88 \
+        --context-length "${CONTEXT_LENGTH}" \
+        --max-running-requests 4 \
+        --attention-backend flashinfer \
+        --linear-attn-prefill-backend triton \
+        --chunked-prefill-size 16384 \
+        --disable-multimodal \
+        "${spec_args[@]}" \
+        --trust-remote-code \
+        "${SERVER_ARGS[@]}" \
+        "$@"
+}
+
 cmd_shell() {
     [[ -d "${VENV_DIR}" ]] || die "Venv not found at ${VENV_DIR}. Run: ./sglang.sh build"
     info "Activating SGLang venv — type 'deactivate' to exit"
@@ -800,6 +837,7 @@ Commands:
   minimax-m27 [args]             MiniMax M2.7 REAP 172B NVFP4-GB10 (compressed-tensors)
   nemotron [args]                NVIDIA Nemotron-3-Super 120B-A12B NVFP4 + MTP
   mistral-small-4 [args]        Mistral-Small-4-119B NVFP4 + EAGLE
+  step3.7-flash [args]          Step-3.7-Flash-173B NVFP4 + MTP
 
 Build options:
   --skip-venv       Skip venv creation
@@ -820,6 +858,7 @@ Model path overrides:
   NEMOTRON_MODEL=<path>            Override Nemotron model path
   MISTRAL_MODEL=<path>             Override Mistral-Small-4 model path
   MISTRAL_EAGLE_MODEL=<path>       Override Mistral-Small-4 EAGLE draft path
+  STEP_MODEL=<path>                Override Step-3.7-Flash-173B model path
 
 Environment overrides:
   CONTEXT_LENGTH=N               Context window tokens (default: 65536)
@@ -854,6 +893,7 @@ case "${CMD}" in
     minimax-m27|MiniMax-M27|minimax-m2.7|MiniMax-M2.7) cmd_minimax_m27 "$@" ;;
     nemotron|Nemotron|nemotron-3-super|Nemotron-3-Super) cmd_nemotron "$@" ;;
     mistral-small-4|Mistral-Small-4|mistral-small4) cmd_mistral_small4 "$@" ;;
+    step3.7-flash|Step-3.7-Flash|step-3.7-flash|step3p7-flash) cmd_step3p7_flash "$@" ;;
     ""|help|-h|--help) usage ;;
     *) die "Unknown command: ${CMD}. Run './sglang.sh help' for usage." ;;
 esac
