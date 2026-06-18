@@ -2706,13 +2706,6 @@ class ServerArgs:
 
                 self._handle_mamba_radix_cache(model_arch=model_arch)
 
-        elif model_arch == "MiniCPMV4_6ForConditionalGeneration":
-            # 4.6 wraps a Qwen3.5 hybrid GDN backbone, so it needs the same
-            # mamba radix cache handling as Qwen3_5ForConditionalGeneration.
-            if is_sm100_supported() and self.attention_backend is None:
-                self.attention_backend = "triton"
-            self._handle_mamba_radix_cache(model_arch=model_arch)
-
                 # SM12.x: auto-select flashinfer for GatedDeltaNet linear attention
                 # ONLY if the device has enough shared memory (>=228 KB optin).
                 # FlashInfer GDN CUTLASS kernels are compiled for SM90a and use
@@ -2729,9 +2722,7 @@ class ServerArgs:
                     _librt = ctypes.cdll.LoadLibrary("libcudart.so")
                     _smem = ctypes.c_int()
                     # cudaDevAttrMaxSharedMemoryPerBlockOptin = 97
-                    _librt.cudaDeviceGetAttribute(
-                        ctypes.byref(_smem), 97, 0
-                    )
+                    _librt.cudaDeviceGetAttribute(ctypes.byref(_smem), 97, 0)
                     if _smem.value >= 228 * 1024:
                         self.linear_attn_backend = "flashinfer"
                         logger.info(
@@ -2746,6 +2737,13 @@ class ServerArgs:
                             "bytes (< 228 KB required by FlashInfer GDN "
                             "CUTLASS kernels)."
                         )
+
+        elif model_arch == "MiniCPMV4_6ForConditionalGeneration":
+            # 4.6 wraps a Qwen3.5 hybrid GDN backbone, so it needs the same
+            # mamba radix cache handling as Qwen3_5ForConditionalGeneration.
+            if is_sm100_supported() and self.attention_backend is None:
+                self.attention_backend = "triton"
+            self._handle_mamba_radix_cache(model_arch=model_arch)
 
         elif model_arch in ["Glm4MoeForCausalLM"]:
             if is_sm100_supported():
