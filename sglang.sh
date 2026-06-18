@@ -638,6 +638,7 @@ cmd_qwen36_35b_nvfp4() {
         --chunked-prefill-size 16384 \
         "${spec_args[@]}" \
         --reasoning-parser qwen3 \
+        --tool-call-parser qwen3_coder \
         --trust-remote-code \
         "${SERVER_ARGS[@]}" \
         --served-model-name qwen36 \
