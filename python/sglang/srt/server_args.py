@@ -4435,9 +4435,7 @@ class ServerArgs:
                     _librt = ctypes.cdll.LoadLibrary("libcudart.so")
                     _smem = ctypes.c_int()
                     # cudaDevAttrMaxSharedMemoryPerBlockOptin = 97
-                    _librt.cudaDeviceGetAttribute(
-                        ctypes.byref(_smem), 97, 0
-                    )
+                    _librt.cudaDeviceGetAttribute(ctypes.byref(_smem), 97, 0)
                     if _smem.value >= 228 * 1024:
                         self.linear_attn_backend = "flashinfer"
                         logger.info(
