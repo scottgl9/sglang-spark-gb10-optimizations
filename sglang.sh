@@ -7,6 +7,7 @@
 #   shell                          Drop into an activated venv shell
 #   Qwen3.5-NVFP4 [args]          Qwen3.5-122B MoE NVFP4 + speculative decoding
 #   Qwen3.5-35B-NVFP4 [args]      Sehyo/Qwen3.5-35B-A3B-NVFP4 + speculative decoding
+#   Qwen3.6-35B-NVFP4 [args]      NVIDIA Qwen3.6-35B-A3B-NVFP4 (modelopt_mixed, MM + MTP)
 #   Qwen3-Coder-Next-NVFP4 [args] GadflyII Qwen3-Coder-Next NVFP4
 #   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next dense FP8
 #   minimax-m27 [args]             MiniMax M2.7 REAP 172B NVFP4-GB10 (compressed-tensors)
@@ -598,6 +599,51 @@ cmd_qwen35_35b_nvfp4() {
         "$@"
 }
 
+cmd_qwen36_35b_nvfp4() {
+    # NVIDIA Qwen3.6-35B-A3B-NVFP4 — ModelOpt MIXED_PRECISION checkpoint:
+    #   linear_attn (GatedDeltaNet) -> FP8, MoE experts -> W4A16-NVFP4, KV -> FP8.
+    # Multimodal (vision + video) is left enabled; the checkpoint ships a vision
+    # tower (model.visual.*) and the qwen_vl multimodal processor handles it.
+    # MTP: checkpoint ships mtp.* weights (mtp_num_hidden_layers=1) -> NEXTN.
+    local _snap="/home/scottgl/.cache/huggingface/hub/models--nvidia--Qwen3.6-35B-A3B-NVFP4/snapshots/491c2f1ea524c639598bf8fa787a93fed5a6fbce"
+    local model="${QWEN36_35B_MODEL:-${_snap}}"
+    local ctx="${CONTEXT_LENGTH:-262144}"
+
+    local spec_args=()
+    if [[ "${DISABLE_MTP:-}" != "1" ]]; then
+        spec_args=(
+            --speculative-algorithm NEXTN
+            --speculative-num-steps 2
+            --speculative-eagle-topk 1
+            --speculative-num-draft-tokens 2
+            --mamba-radix-cache-strategy extra_buffer
+        )
+        export SGLANG_ENABLE_SPEC_V2=1
+        info "Preset: Qwen3.6-35B-A3B-NVFP4 (modelopt_mixed NVFP4, multimodal, MTP NEXTN)"
+    else
+        info "Preset: Qwen3.6-35B-A3B-NVFP4 (modelopt_mixed NVFP4, multimodal, MTP DISABLED)"
+    fi
+    info "  Model : ${model}"
+    info "  CtxLen: ${ctx}  (max-running-requests 2)"
+
+    cmd_launch \
+        --model-path "${model}" \
+        --quantization modelopt_mixed \
+        --mem-fraction-static 0.85 \
+        --context-length "${ctx}" \
+        --max-running-requests 2 \
+        --attention-backend flashinfer \
+        --linear-attn-backend triton \
+        --linear-attn-prefill-backend triton \
+        --chunked-prefill-size 16384 \
+        "${spec_args[@]}" \
+        --reasoning-parser qwen3 \
+        --trust-remote-code \
+        "${SERVER_ARGS[@]}" \
+        --served-model-name qwen36 \
+        "$@"
+}
+
 cmd_qwen3_coder_next_nvfp4() {
     local model="${QWEN3_CODER_NVFP4_MODEL:-GadflyII/Qwen3-Coder-Next-NVFP4}"
     local ctx="${CONTEXT_LENGTH:-131072}"
@@ -795,6 +841,7 @@ Commands:
 
   Qwen3.5-NVFP4 [args]          Qwen3.5-122B MoE NVFP4, speculative decoding
   Qwen3.5-35B-NVFP4 [args]      Sehyo/Qwen3.5-35B-A3B-NVFP4, speculative decoding
+  Qwen3.6-35B-NVFP4 [args]      NVIDIA Qwen3.6-35B-A3B-NVFP4 (modelopt_mixed, multimodal + MTP)
   Qwen3-Coder-Next-NVFP4 [args] GadflyII/Qwen3-Coder-Next-NVFP4
   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next-FP8
   minimax-m27 [args]             MiniMax M2.7 REAP 172B NVFP4-GB10 (compressed-tensors)
@@ -814,6 +861,7 @@ Context window (default: ${CONTEXT_LENGTH}):
 Model path overrides:
   QWEN35_MODEL=<path>              Override Qwen3.5-NVFP4 model path
   QWEN35_35B_MODEL=<path>          Override Qwen3.5-35B-NVFP4 model path
+  QWEN36_35B_MODEL=<path>          Override Qwen3.6-35B-NVFP4 model path
   QWEN3_CODER_NVFP4_MODEL=<path>  Override Qwen3-Coder-Next-NVFP4 model
   QWEN3_CODER_MODEL=<path>        Override Qwen3-Coder-Next-FP8 model
   MINIMAX_MODEL=<path>             Override MiniMax model path
@@ -849,6 +897,7 @@ case "${CMD}" in
     shell)   cmd_shell ;;
     Qwen3.5-NVFP4|qwen3.5-nvfp4|qwen35-nvfp4) cmd_qwen35_nvfp4 "$@" ;;
     Qwen3.5-35B-NVFP4|qwen3.5-35b-nvfp4|qwen35-35b-nvfp4) cmd_qwen35_35b_nvfp4 "$@" ;;
+    Qwen3.6-35B-NVFP4|qwen3.6-35b-nvfp4|qwen36-35b-nvfp4|qwen36) cmd_qwen36_35b_nvfp4 "$@" ;;
     Qwen3-Coder-Next-NVFP4|qwen3-coder-next-nvfp4) cmd_qwen3_coder_next_nvfp4 "$@" ;;
     Qwen3-Coder-Next-FP8|qwen3-coder-next-fp8) cmd_qwen3_coder_next_fp8 "$@" ;;
     minimax-m27|MiniMax-M27|minimax-m2.7|MiniMax-M2.7) cmd_minimax_m27 "$@" ;;
