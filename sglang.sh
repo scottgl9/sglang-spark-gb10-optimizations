@@ -631,7 +631,7 @@ cmd_qwen36_35b_nvfp4() {
         --quantization modelopt_mixed \
         --mem-fraction-static 0.85 \
         --context-length "${ctx}" \
-        --max-running-requests 2 \
+        --max-running-requests 4 \
         --attention-backend flashinfer \
         --linear-attn-backend triton \
         --linear-attn-prefill-backend triton \
