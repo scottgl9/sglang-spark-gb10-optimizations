@@ -624,7 +624,7 @@ cmd_qwen36_35b_nvfp4() {
         info "Preset: Qwen3.6-35B-A3B-NVFP4 (modelopt_mixed NVFP4, multimodal, MTP DISABLED)"
     fi
     info "  Model : ${model}"
-    info "  CtxLen: ${ctx}  (max-running-requests 2)"
+    info "  CtxLen: ${ctx}  (max-running-requests 4)"
 
     cmd_launch \
         --model-path "${model}" \
