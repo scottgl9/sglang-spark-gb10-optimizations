@@ -645,6 +645,56 @@ cmd_qwen36_35b_nvfp4() {
         "$@"
 }
 
+cmd_ornith_35b_fp8() {
+    # deepreinforce-ai Ornith-1.0-35B-FP8 — Qwen3.5-MoE-architecture checkpoint
+    # (Qwen3_5MoeForConditionalGeneration) with plain compressed-tensors FP8
+    # W8A8 quantization (per-channel weights, dynamic per-token activations;
+    # lm_head/embed_tokens/gate/linear_attn/vision stay BF16 per the model's
+    # quantization_config.ignore list) -- NOT a ModelOpt NVFP4 checkpoint, so
+    # --quantization compressed-tensors is used instead of modelopt_mixed.
+    # Multimodal (vision tower) and hybrid GDN linear-attn layout match
+    # Qwen3.6-35B-A3B-NVFP4, so this preset mirrors cmd_qwen36_35b_nvfp4.
+    # MTP: checkpoint ships mtp.* weights (mtp_num_hidden_layers=1) -> NEXTN.
+    local _snap="/home/scottgl/.cache/huggingface/hub/models--deepreinforce-ai--Ornith-1.0-35B-FP8/snapshots/1ab57ce0b44950e498a88756f40ad1ed4d0f30ca"
+    local model="${ORNITH_35B_MODEL:-${_snap}}"
+    local ctx="${CONTEXT_LENGTH:-262144}"
+
+    local spec_args=()
+    if [[ "${DISABLE_MTP:-}" != "1" ]]; then
+        spec_args=(
+            --speculative-algorithm NEXTN
+            --speculative-num-steps 2
+            --speculative-eagle-topk 1
+            --speculative-num-draft-tokens 2
+            --mamba-radix-cache-strategy extra_buffer
+        )
+        export SGLANG_ENABLE_SPEC_V2=1
+        info "Preset: Ornith-1.0-35B-FP8 (compressed-tensors FP8, multimodal, MTP NEXTN)"
+    else
+        info "Preset: Ornith-1.0-35B-FP8 (compressed-tensors FP8, multimodal, MTP DISABLED)"
+    fi
+    info "  Model : ${model}"
+    info "  CtxLen: ${ctx}  (max-running-requests 4)"
+
+    cmd_launch \
+        --model-path "${model}" \
+        --quantization compressed-tensors \
+        --mem-fraction-static 0.85 \
+        --context-length "${ctx}" \
+        --max-running-requests 4 \
+        --attention-backend flashinfer \
+        --linear-attn-backend triton \
+        --linear-attn-prefill-backend triton \
+        --chunked-prefill-size 16384 \
+        "${spec_args[@]}" \
+        --reasoning-parser qwen3 \
+        --tool-call-parser qwen3_coder \
+        --trust-remote-code \
+        "${SERVER_ARGS[@]}" \
+        --served-model-name ornith \
+        "$@"
+}
+
 cmd_qwen3_coder_next_nvfp4() {
     local model="${QWEN3_CODER_NVFP4_MODEL:-GadflyII/Qwen3-Coder-Next-NVFP4}"
     local ctx="${CONTEXT_LENGTH:-131072}"
@@ -884,6 +934,7 @@ Examples:
   CONTEXT_LENGTH=32768 ./sglang.sh Qwen3.5-NVFP4
   ./sglang.sh minimax-m27                        # MiniMax M2.7 (compressed-tensors NVFP4)
   CONTEXT_LENGTH=4096 ./sglang.sh minimax-m27    # tight-memory mode for 128 GB hosts
+  ./sglang.sh ornith                              # Ornith-1.0-35B-FP8 (compressed-tensors FP8, MTP)
 
 EOF
 }
@@ -899,6 +950,7 @@ case "${CMD}" in
     Qwen3.5-NVFP4|qwen3.5-nvfp4|qwen35-nvfp4) cmd_qwen35_nvfp4 "$@" ;;
     Qwen3.5-35B-NVFP4|qwen3.5-35b-nvfp4|qwen35-35b-nvfp4) cmd_qwen35_35b_nvfp4 "$@" ;;
     Qwen3.6-35B-NVFP4|qwen3.6-35b-nvfp4|qwen36-35b-nvfp4|qwen36) cmd_qwen36_35b_nvfp4 "$@" ;;
+    Ornith-1.0-35B-FP8|ornith-1.0-35b-fp8|ornith-35b-fp8|ornith) cmd_ornith_35b_fp8 "$@" ;;
     Qwen3-Coder-Next-NVFP4|qwen3-coder-next-nvfp4) cmd_qwen3_coder_next_nvfp4 "$@" ;;
     Qwen3-Coder-Next-FP8|qwen3-coder-next-fp8) cmd_qwen3_coder_next_fp8 "$@" ;;
     minimax-m27|MiniMax-M27|minimax-m2.7|MiniMax-M2.7) cmd_minimax_m27 "$@" ;;
