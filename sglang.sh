@@ -659,6 +659,10 @@ cmd_ornith_35b_fp8() {
     local model="${ORNITH_35B_MODEL:-${_snap}}"
     local ctx="${CONTEXT_LENGTH:-262144}"
 
+    # lm_head/embed_tokens FP8 post-quant disabled for Ornith.
+    export SGLANG_QUANTIZE_LM_HEAD_FP8=0
+    export SGLANG_QUANTIZE_EMBED_FP8=0
+
     local spec_args=()
     if [[ "${DISABLE_MTP:-}" != "1" ]]; then
         spec_args=(
