@@ -18,8 +18,9 @@ def _compute_enable_deep_gemm():
     sm_version = get_device_sm()
     if (_is_cuda and sm_version < 90) or (_is_musa and sm_version < 31):
         return False
-    # DeepGEMM requires TMEM/tcgen05 (SM100+datacenter), not available on SM120
-    if sm_version == 120:
+    # DeepGEMM requires TMEM/tcgen05 (SM100+datacenter), not available on the
+    # SM12.x consumer Blackwell family (includes SM120 and GB10's SM121).
+    if 120 <= sm_version < 130:
         return False
     if not (_is_cuda or _is_musa):
         return False
