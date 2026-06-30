@@ -4376,9 +4376,25 @@ class ServerArgs:
                 # SM121 (GB10/Spark) CUTLASS FP4 MoE produces all-zero output.
                 # TRT-LLM FP4 MoE fails with SM100f cubin mismatch.
                 # vLLM fixed this by forcing Marlin MoE (dequant FP4->BF16).
-                # Force marlin backend for SM120/SM121 with compressed-tensors NVFP4.
+                # Force marlin backend for SM120/SM121 with compressed-tensors NVFP4
+                # ONLY -- marlin has no MoE path for W8A8 FP8 compressed-tensors
+                # checkpoints (CompressedTensorsW8A8Fp8MoE.create_moe_runner()
+                # leaves self.runner unset for non-aiter/triton/flashinfer_trtllm
+                # backends, crashing with AttributeError on first forward).
+                quant_cfg = getattr(hf_config, "quantization_config", None) or {}
+                config_groups = (
+                    quant_cfg.get("config_groups", {})
+                    if isinstance(quant_cfg, dict)
+                    else {}
+                )
+                is_nvfp4_compressed_tensors = any(
+                    isinstance(group, dict)
+                    and group.get("weights", {}).get("num_bits") == 4
+                    for group in config_groups.values()
+                )
                 if (
-                    self.moe_a2a_backend == "none"
+                    is_nvfp4_compressed_tensors
+                    and self.moe_a2a_backend == "none"
                     and self.moe_runner_backend == "auto"
                 ):
                     self.moe_runner_backend = "marlin"
