@@ -54,7 +54,18 @@ def configure_kv_cache_dtype(
             resolved_kv_cache_dtype = "fp4_mx_block16"
             logger.info("Auto-detected NVFP4 KV cache from model quantization config.")
         else:
-            kv_cache_dtype = model_dtype
+            # On Blackwell, FP8 KV cache materially reduces bandwidth pressure;
+            # this is especially important for GB10's unified LPDDR5X memory.
+            if (
+                not _is_hip
+                and torch.cuda.is_available()
+                and torch.cuda.get_device_capability()[0] >= 10
+            ):
+                kv_cache_dtype = torch.float8_e4m3fn
+                resolved_kv_cache_dtype = "fp8_e4m3"
+                logger.info("Auto-selected FP8 KV cache on Blackwell GPU.")
+            else:
+                kv_cache_dtype = model_dtype
     elif server_args_kv_cache_dtype == "fp8_e5m2":
         if _is_hip:  # Using natively supported format
             kv_cache_dtype = fp8_dtype
