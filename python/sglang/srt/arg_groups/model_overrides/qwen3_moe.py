@@ -47,4 +47,24 @@ def _qwen3_moe_family_overrides(server_args: Any, hf_config: Any) -> dict:
                 "Use flashinfer_trtllm as MoE runner backend on sm100 for "
                 f"{hf_config.architectures[0]}"
             )
+    elif (
+        get_platform().is_sm120
+        and cfg.quantization == "compressed-tensors"
+        and cfg.moe_a2a_backend == "none"
+        and cfg.moe_runner_backend == "auto"
+    ):
+        quant_cfg = getattr(hf_config, "quantization_config", None) or {}
+        config_groups = (
+            quant_cfg.get("config_groups", {}) if isinstance(quant_cfg, dict) else {}
+        )
+        is_nvfp4 = any(
+            isinstance(group, dict) and group.get("weights", {}).get("num_bits") == 4
+            for group in config_groups.values()
+        )
+        if is_nvfp4:
+            overrides["moe_runner_backend"] = "marlin"
+            logger.warning(
+                "SM120/SM121 compressed-tensors NVFP4: selecting Marlin MoE "
+                "backend because CUTLASS/TRT-LLM FP4 MoE is incompatible on GB10."
+            )
     return overrides

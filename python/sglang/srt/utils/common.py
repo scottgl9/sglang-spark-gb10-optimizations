@@ -1026,6 +1026,21 @@ def set_cuda_arch():
             f"{arch}{'a' if capability[0] >= 9 else ''}"
         )
 
+        # GB10 (SM121) needs compatibility patches before FlashInfer JIT runs.
+        if capability == (12, 1):
+            from sglang.srt.utils.gb10_flashinfer_compat import (
+                ensure_flashinfer_sm121_compat,
+            )
+
+            ensure_flashinfer_sm121_compat()
+
+    # Triton's bundled CUDA 12.8 ptxas rejects sm_121a; use system ptxas when
+    # available, while preserving an explicit user override.
+    if "TRITON_PTXAS_PATH" not in os.environ:
+        system_ptxas = "/usr/local/cuda/bin/ptxas"
+        if os.path.isfile(system_ptxas):
+            os.environ["TRITON_PTXAS_PATH"] = system_ptxas
+
 
 @lru_cache(maxsize=1)
 def is_gfx95_supported():
