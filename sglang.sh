@@ -8,6 +8,7 @@
 #   Qwen3.5-NVFP4 [args]          Qwen3.5-122B MoE NVFP4 + speculative decoding
 #   Qwen3.5-35B-NVFP4 [args]      Sehyo/Qwen3.5-35B-A3B-NVFP4 + speculative decoding
 #   Qwen3.6-35B-NVFP4 [args]      NVIDIA Qwen3.6-35B-A3B-NVFP4 (modelopt_mixed, MM + MTP)
+#   laguna-s-2.1 [args]           Poolside Laguna-S-2.1 NVFP4 + DFLASH
 #   Qwen3-Coder-Next-NVFP4 [args] GadflyII Qwen3-Coder-Next NVFP4
 #   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next dense FP8
 #   minimax-m27 [args]             MiniMax M2.7 REAP 172B NVFP4-GB10 (compressed-tensors)
@@ -34,6 +35,8 @@
 #   QWEN35_35B_MODEL=Sehyo/...                   ./sglang.sh Qwen3.5-35B-NVFP4
 #   QWEN3_CODER_NVFP4_MODEL=GadflyII/...         ./sglang.sh Qwen3-Coder-Next-NVFP4
 #   QWEN3_CODER_MODEL=Qwen/Qwen3-Coder-Next-FP8  ./sglang.sh Qwen3-Coder-Next-FP8
+#   LAGUNA_MODEL=/path/to/snapshot                ./sglang.sh laguna-s-2.1
+#   LAGUNA_DFLASH_MODEL=/path/to/snapshot         ./sglang.sh laguna-s-2.1
 #   MINIMAX_MODEL=/path/to/model                  ./sglang.sh minimax-m27
 #   NEMOTRON_MODEL=/path/to/model                 ./sglang.sh nemotron
 #   MISTRAL_MODEL=/path/to/model                  ./sglang.sh mistral-small-4
@@ -42,6 +45,7 @@
 # Key environment overrides:
 #   CONTEXT_LENGTH             Context window tokens (default: 65536)
 #   DISABLE_MTP=1              Disable speculative decoding for Qwen3.5-NVFP4 / nemotron
+#   DISABLE_DFLASH=1           Disable DFLASH for Laguna-S-2.1
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -282,13 +286,24 @@ cmd_build() {
 
         local SITE_PKG
         SITE_PKG=$(python -c "import site; print(site.getsitepackages()[0])")
-        local FP4_FILE="${SITE_PKG}/flashinfer/fp4_quantization.py"
+        local FP4_FILE
+        # FlashInfer 0.6.14+ moved the implementation under quantization/;
+        # prefer that implementation when available (the top-level module is
+        # only a compatibility re-export in newer releases).
+        if [[ -f "${SITE_PKG}/flashinfer/quantization/fp4_quantization.py" ]]; then
+            FP4_FILE="${SITE_PKG}/flashinfer/quantization/fp4_quantization.py"
+        else
+            FP4_FILE="${SITE_PKG}/flashinfer/fp4_quantization.py"
+        fi
         local CPP_EXT_FILE="${SITE_PKG}/flashinfer/jit/cpp_ext.py"
 
         # Fix 9d: fp4_quantization.py — register torch.library custom ops
         if [[ -f "${FP4_FILE}" ]]; then
             if grep -q "_ensure_fp4_fns_cached" "${FP4_FILE}"; then
                 info "Fix 9d: already applied — skipping"
+            elif grep -q "register_fake_op\|register_fake" "${FP4_FILE}" && \
+                 grep -q "register_custom_op\|custom_op" "${FP4_FILE}"; then
+                info "Fix 9d: upstream FlashInfer custom/fake-op wrappers detected — skipping"
             else
                 info "Fix 9d: applying to ${FP4_FILE}"
                 python3 - "${FP4_FILE}" <<'PYEOF'
@@ -649,6 +664,59 @@ cmd_qwen36_35b_nvfp4() {
         "$@"
 }
 
+cmd_laguna_s_21() {
+    # Poolside Laguna-S-2.1: 117.6B total / 8.5B active MoE model. The NVFP4
+    # checkpoint uses compressed-tensors with FP8 KV cache and ships a matching
+    # 6-layer BF16 DFLASH speculator. The model card recommends 256K context,
+    # 0.85 memory utilization, max 32 sequences, and poolside_v1 parsers.
+    local _snap="/home/scottgl/.cache/huggingface/hub/models--poolside--Laguna-S-2.1-NVFP4/snapshots/b482b5d57fda6e4e562a652869bde24ba2a57c92"
+    local _draft_snap="/home/scottgl/.cache/huggingface/hub/models--poolside--Laguna-S-2.1-DFlash-NVFP4/snapshots/723794750422b3efbf3a7b3af76dffb4ba035943"
+    local model="${LAGUNA_MODEL:-${_snap}}"
+    local draft="${LAGUNA_DFLASH_MODEL:-${_draft_snap}}"
+    local ctx="${CONTEXT_LENGTH:-262144}"
+
+    # CuteDSL needs the architecture-qualified target for SM121 NVFP4 JIT.
+    export CUTE_DSL_ARCH="${CUTE_DSL_ARCH:-sm_121a}"
+
+    local spec_args=()
+    if [[ "${DISABLE_DFLASH:-}" != "1" ]]; then
+        spec_args=(
+            --speculative-algorithm DFLASH
+            --speculative-draft-model-path "${draft}"
+            # Laguna's DFLASH checkpoint is BF16 (not compressed-tensors NVFP4).
+            --speculative-draft-model-quantization unquant
+            --speculative-dflash-block-size 16
+        )
+        info "Preset: Laguna-S-2.1 NVFP4 (compressed-tensors, DFLASH 16-token block)"
+    else
+        info "Preset: Laguna-S-2.1 NVFP4 (compressed-tensors, DFLASH DISABLED)"
+    fi
+    info "  Model : ${model}"
+    info "  Draft : ${draft}"
+    info "  CtxLen: ${ctx}  (max-running-requests 32)"
+    info "  KV    : ${KV_CACHE_DTYPE}"
+
+    cmd_launch \
+        --model-path "${model}" \
+        --served-model-name laguna-s-2.1 \
+        --quantization compressed-tensors \
+        --context-length "${ctx}" \
+        --mem-fraction-static 0.85 \
+        --max-running-requests 4 \
+        --attention-backend flashinfer \
+        --linear-attn-backend triton \
+        --linear-attn-prefill-backend triton \
+        --chunked-prefill-size 16384 \
+        --mamba-full-memory-ratio auto \
+        --mamba-ssm-dtype bfloat16 \
+        --disable-piecewise-cuda-graph \
+        --disable-multimodal \
+        --tool-call-parser poolside_v1 \
+        --reasoning-parser poolside_v1 \
+        "${spec_args[@]}" \
+        "$@"
+}
+
 cmd_ornith_35b_fp8() {
     # deepreinforce-ai Ornith-1.0-35B-FP8 — Qwen3.5-MoE-architecture checkpoint
     # (Qwen3_5MoeForConditionalGeneration) with plain compressed-tensors FP8
@@ -901,6 +969,7 @@ Commands:
   Qwen3.5-NVFP4 [args]          Qwen3.5-122B MoE NVFP4, speculative decoding
   Qwen3.5-35B-NVFP4 [args]      Sehyo/Qwen3.5-35B-A3B-NVFP4, speculative decoding
   Qwen3.6-35B-NVFP4 [args]      NVIDIA Qwen3.6-35B-A3B-NVFP4 (modelopt_mixed, multimodal + MTP)
+  laguna-s-2.1 [args]           Poolside Laguna-S-2.1 NVFP4 + DFLASH
   Qwen3-Coder-Next-NVFP4 [args] GadflyII/Qwen3-Coder-Next-NVFP4
   Qwen3-Coder-Next-FP8 [args]   Qwen/Qwen3-Coder-Next-FP8
   minimax-m27 [args]             MiniMax M2.7 REAP 172B NVFP4-GB10 (compressed-tensors)
@@ -921,6 +990,8 @@ Model path overrides:
   QWEN35_MODEL=<path>              Override Qwen3.5-NVFP4 model path
   QWEN35_35B_MODEL=<path>          Override Qwen3.5-35B-NVFP4 model path
   QWEN36_35B_MODEL=<path>          Override Qwen3.6-35B-NVFP4 model path
+  LAGUNA_MODEL=<path>              Override Laguna-S-2.1-NVFP4 model path
+  LAGUNA_DFLASH_MODEL=<path>       Override Laguna-S-2.1 DFLASH draft path
   QWEN3_CODER_NVFP4_MODEL=<path>  Override Qwen3-Coder-Next-NVFP4 model
   QWEN3_CODER_MODEL=<path>        Override Qwen3-Coder-Next-FP8 model
   MINIMAX_MODEL=<path>             Override MiniMax model path
@@ -931,6 +1002,7 @@ Model path overrides:
 Environment overrides:
   CONTEXT_LENGTH=N               Context window tokens (default: 65536)
   DISABLE_MTP=1                  Disable speculative decoding (Qwen3.5-NVFP4)
+  DISABLE_DFLASH=1               Disable DFLASH speculative decoding (laguna-s-2.1)
   ENABLE_EAGLE=1                 Enable EAGLE speculative decoding (mistral-small-4, experimental)
   SGLANG_QUANTIZE_LM_HEAD_FP8=0 Disable FP8 lm_head quantization (default: 1)
   SGLANG_QUANTIZE_EMBED_FP8=0   Disable FP8 embed_tokens quantization (default: 1)
@@ -941,6 +1013,7 @@ Examples:
   ./sglang.sh Qwen3.5-NVFP4
   CONTEXT_LENGTH=32768 ./sglang.sh Qwen3.5-NVFP4
   ./sglang.sh minimax-m27                        # MiniMax M2.7 (compressed-tensors NVFP4)
+  ./sglang.sh laguna-s-2.1                       # Poolside Laguna-S-2.1 NVFP4 + DFLASH
   CONTEXT_LENGTH=4096 ./sglang.sh minimax-m27    # tight-memory mode for 128 GB hosts
   ./sglang.sh ornith                              # Ornith-1.0-35B-FP8 (compressed-tensors FP8, MTP)
 
@@ -958,6 +1031,7 @@ case "${CMD}" in
     Qwen3.5-NVFP4|qwen3.5-nvfp4|qwen35-nvfp4) cmd_qwen35_nvfp4 "$@" ;;
     Qwen3.5-35B-NVFP4|qwen3.5-35b-nvfp4|qwen35-35b-nvfp4) cmd_qwen35_35b_nvfp4 "$@" ;;
     Qwen3.6-35B-NVFP4|qwen3.6-35b-nvfp4|qwen36-35b-nvfp4|qwen36) cmd_qwen36_35b_nvfp4 "$@" ;;
+    laguna-s-2.1|Laguna-S-2.1|laguna|Laguna) cmd_laguna_s_21 "$@" ;;
     Ornith-1.0-35B-FP8|ornith-1.0-35b-fp8|ornith-35b-fp8|ornith) cmd_ornith_35b_fp8 "$@" ;;
     Qwen3-Coder-Next-NVFP4|qwen3-coder-next-nvfp4) cmd_qwen3_coder_next_nvfp4 "$@" ;;
     Qwen3-Coder-Next-FP8|qwen3-coder-next-fp8) cmd_qwen3_coder_next_fp8 "$@" ;;
