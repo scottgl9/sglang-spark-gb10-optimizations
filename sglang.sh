@@ -678,6 +678,14 @@ cmd_laguna_s_21() {
     # CuteDSL needs the architecture-qualified target for SM121 NVFP4 JIT.
     export CUTE_DSL_ARCH="${CUTE_DSL_ARCH:-sm_121a}"
 
+    # lm_head is BF16 in this checkpoint (compressed-tensors ignore list) --
+    # halve its per-token DRAM read cost with dynamic FP8 post-quant. Safe to
+    # combine with DFLASH here: dflash_worker_v2.py's draft-sampler-folding
+    # guard now checks for fp8_dtype explicitly (torch.is_floating_point()
+    # alone doesn't catch FP8), so a quantized lm_head correctly falls back to
+    # the eager draft sampler instead of hitting an unsupported FP8 matmul.
+    export SGLANG_QUANTIZE_LM_HEAD_FP8="${SGLANG_QUANTIZE_LM_HEAD_FP8:-1}"
+
     local spec_args=()
     if [[ "${DISABLE_DFLASH:-}" != "1" ]]; then
         spec_args=(
@@ -693,12 +701,12 @@ cmd_laguna_s_21() {
     fi
     info "  Model : ${model}"
     info "  Draft : ${draft}"
-    info "  CtxLen: ${ctx}  (max-running-requests 32)"
+    info "  CtxLen: ${ctx}  (max-running-requests 4)"
     info "  KV    : ${KV_CACHE_DTYPE}"
 
     cmd_launch \
         --model-path "${model}" \
-        --served-model-name laguna-s-2.1 \
+        --served-model-name laguna \
         --quantization compressed-tensors \
         --context-length "${ctx}" \
         --mem-fraction-static 0.85 \
@@ -713,6 +721,7 @@ cmd_laguna_s_21() {
         --disable-multimodal \
         --tool-call-parser poolside_v1 \
         --reasoning-parser poolside_v1 \
+        --preferred-sampling-params '{"temperature":0.7,"top_p":0.95}' \
         "${spec_args[@]}" \
         "$@"
 }
