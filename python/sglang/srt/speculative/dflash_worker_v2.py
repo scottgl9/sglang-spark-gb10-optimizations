@@ -5,6 +5,7 @@ from typing import List, Optional
 
 import torch
 
+from sglang.kernels.ops.quantization.fp8_kernel import fp8_dtype
 from sglang.kernels.ops.speculative.cache_locs import (
     assign_extend_cache_locs_func,
     rebuild_compact_draft_req_to_token_func,
@@ -377,8 +378,10 @@ class DFlashWorkerV2(BaseSpecWorker):
         lm_head = getattr(target_model, "lm_head", None)
         if lm_head is None or not hasattr(lm_head, "weight"):
             return _eager("no target lm_head")
-        if not torch.is_floating_point(lm_head.weight):
-            # Quantized lm_head (FP8/INT) would break the static matmul.
+        if not torch.is_floating_point(lm_head.weight) or lm_head.weight.dtype == fp8_dtype:
+            # Quantized lm_head (FP8/INT) would break the static matmul: FP8
+            # dtypes report is_floating_point()==True, so INT and FP8 need
+            # separate checks here.
             return _eager("quantized lm_head")
         tp_group = get_tp_group()
         if not hasattr(lm_head, "shard_indices"):

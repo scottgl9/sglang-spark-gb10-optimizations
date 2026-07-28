@@ -200,6 +200,41 @@ from the target model's lm_head to the draft model's lm_head.
 
 ---
 
+## Fix 9: DFlash Draft Sampler Broke Silently Under FP8 lm_head
+
+**File:** `python/sglang/srt/speculative/dflash_worker_v2.py`
+
+DFLASH speculative decoding (used by Poolside Laguna-S-2.1, distinct from
+EAGLE/MTP) has a "draft greedy head folded into the draft cuda graph" fast
+path (`_maybe_build_draft_sampler`) that borrows the target model's `lm_head`
+weight directly and runs a raw `torch.matmul` against it — bypassing
+`quant_method.apply()` entirely, unlike the target model's own forward pass.
+
+**Root cause (two compounding bugs):**
+1. The guard meant to route quantized `lm_head` away from this fast path
+   checked `not torch.is_floating_point(lm_head.weight)`. FP8 dtypes report
+   `is_floating_point() == True`, so an FP8-quantized `lm_head`
+   (`SGLANG_QUANTIZE_LM_HEAD_FP8=1`) incorrectly passed the check.
+2. `Fp8LinearMethod.process_weights_after_loading()` stores the quantized
+   weight **transposed** (`[hidden, vocab]` instead of `[vocab, hidden]`, see
+   Fix 6/7's `fp8_scaled_mm` convention). The draft sampler's
+   `self.weight[:num_org].T` slicing assumes the untransposed layout, so even
+   past bug 1 this would hit a shape-mismatched matmul.
+
+**Fix:** Added an explicit `lm_head.weight.dtype == fp8_dtype` check
+(imported from `sglang.kernels.ops.quantization.fp8_kernel`) alongside the
+existing `is_floating_point` check, so FP8-quantized `lm_head` correctly
+falls back to the eager draft sampler instead of reaching either bug.
+
+**Impact:** Unblocks combining `SGLANG_QUANTIZE_LM_HEAD_FP8=1` with DFLASH
+(previously would have crashed at CUDA-graph capture, or on a shape
+mismatch, for any model doing both). Same underlying pattern as Fix 8 —
+a speculative-decoding draft-side fast path silently assuming BF16 `lm_head`
+— but a different specific mechanism (dtype-guard miss + transposed layout,
+vs. missing weight_scale sharing).
+
+---
+
 ## Performance Results
 
 ### Qwen3.5-35B-A3B-NVFP4 on GB10
