@@ -108,6 +108,21 @@ setup_runtime_env() {
     export FLASHINFER_WORKSPACE_DIR="${SGLANG_COMPILERS_DIR}/flashinfer"
     export TORCHINDUCTOR_CACHE_DIR="${SGLANG_COMPILERS_DIR}/torch/inductor"
 
+    # flashinfer-python/flashinfer-cubin version drift (e.g. 0.6.14 vs 0.6.12) is
+    # harmless on GB10 -- gdn/kda_flashinfer.py already os.environ.setdefault()
+    # this, but too late for code paths that `import flashinfer` at module load
+    # (e.g. compressed_tensors_w4a4_mxint4_moe.py -> flashinfer.fp4_quantization),
+    # which raises RuntimeError in flashinfer/jit/env.py before that code runs.
+    # Set it here so it's in the environment before the interpreter even starts.
+    export FLASHINFER_DISABLE_VERSION_CHECK="${FLASHINFER_DISABLE_VERSION_CHECK:-1}"
+
+    # This venv's flashinfer-python is intentionally pinned at 0.6.14 (see
+    # build_env.sh) -- no matching flashinfer-cubin release exists yet for the
+    # 0.6.15.post1 floor sglang's own engine.py now asserts at startup, and a
+    # prior attempt to upgrade both together broke sgl-kernel's torch-2.9 ABI.
+    # Skip the hard version-floor assertion for flashinfer-python/sglang-kernel.
+    export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK="${SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK:-1}"
+
     # ── JIT compilation parallelism ──────────────────────────────────────────
     # GB10 unified memory: each nvcc process can use several GB of RAM.
     # Limit parallel compile jobs to avoid OOM during flashinfer JIT builds.
@@ -562,7 +577,6 @@ cmd_qwen35_nvfp4() {
         --linear-attn-backend triton \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
-        --mamba-full-memory-ratio auto \
         --mamba-ssm-dtype bfloat16 \
         --disable-piecewise-cuda-graph \
         --disable-multimodal \
@@ -604,7 +618,6 @@ cmd_qwen35_35b_nvfp4() {
         --attention-backend flashinfer \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
-        --mamba-full-memory-ratio auto \
         --disable-multimodal \
         "${spec_args[@]}" \
         --reasoning-parser qwen3 \
@@ -715,14 +728,13 @@ cmd_laguna_s_21() {
         --linear-attn-backend triton \
         --linear-attn-prefill-backend triton \
         --chunked-prefill-size 16384 \
-        --mamba-full-memory-ratio auto \
         --mamba-ssm-dtype bfloat16 \
         --disable-piecewise-cuda-graph \
-        --disable-multimodal \
         --tool-call-parser poolside_v1 \
         --reasoning-parser poolside_v1 \
         --preferred-sampling-params '{"temperature":0.7,"top_p":0.95}' \
         "${spec_args[@]}" \
+        "${SERVER_ARGS[@]}" \
         "$@"
 }
 

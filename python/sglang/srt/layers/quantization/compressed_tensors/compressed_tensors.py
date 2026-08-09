@@ -31,6 +31,8 @@ from compressed_tensors.quantization import (
 from pydantic import BaseModel
 
 from sglang.srt.layers.moe import MoeRunnerConfig, get_moe_runner_backend
+from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
     LinearMethodBase,
@@ -103,6 +105,10 @@ class DeviceCapability(NamedTuple):
         """
         assert 0 <= self.minor < 10
         return self.major * 10 + self.minor
+
+
+class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
+    """Load static FP8 KV-cache scales from compressed-tensors checkpoints."""
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -180,6 +186,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         ):
             return Fp8LinearMethod(self.lm_head_fp8_config)
 
+        if self._uses_fp8_kv_cache() and isinstance(layer, RadixAttention):
+            return CompressedTensorsKVCacheMethod(self)
+
         if isinstance(layer, LinearBase):
             # If lm_head_fp8_config is set, apply FP8 specifically to lm_head.
             # This intercepts before the ignore-list check so lm_head can be
@@ -226,6 +235,13 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
         self.target_scheme_map["DeepEPMoE"] = self.target_scheme_map["Linear"]
 
+    def _uses_fp8_kv_cache(self) -> bool:
+        return (
+            isinstance(self.kv_cache_scheme, dict)
+            and self.kv_cache_scheme.get("type") == "float"
+            and self.kv_cache_scheme.get("num_bits") == 8
+        )
+
     @property
     def weight_block_size(self) -> Optional[List[int]]:
         """Get the weight block size from the quantization config."""
@@ -244,6 +260,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             config=config
         )
         packed_modules_mapping = config.get("packed_modules_mapping", {})
+        kv_cache_scheme = config.get("kv_cache_scheme")
 
         # If SGLANG_QUANTIZE_LM_HEAD_FP8=1, apply dynamic FP8 to lm_head.
         # This is useful when lm_head is in the model's ignore list (BF16) but
@@ -283,6 +300,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             target_scheme_map=target_scheme_map,
             ignore=ignore,
             quant_format=quant_format,
+            kv_cache_scheme=kv_cache_scheme,
             sparsity_scheme_map=sparsity_scheme_map,
             sparsity_ignore_list=sparsity_ignore_list,
             config=config,

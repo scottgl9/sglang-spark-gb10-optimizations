@@ -8495,7 +8495,9 @@ class ServerArgs:
                 and (is_sm100_supported() or is_sm120_supported())
                 and is_flashinfer_available()
             ):
-                self.speculative_attention_mode = "decode"
+                self.override(
+                    "check_server_args", speculative_attention_mode="decode"
+                )
                 logger.info(
                     "Auto-enabled speculative_attention_mode='decode' for SM100+/SM120+ "
                     "with FlashInfer (faster than prefill mode for draft verification)."

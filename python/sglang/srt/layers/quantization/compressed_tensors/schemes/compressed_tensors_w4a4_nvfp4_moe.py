@@ -56,8 +56,9 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
 
     @property
     def load_up_proj_weight_first(self) -> bool:
-        """Load W13 as ``[up; gate]`` for CUTLASS; TRT-LLM reorders post-load."""
-        return not self.use_flashinfer_trtllm
+        """Only CUTLASS consumes W13 as ``[up; gate]``."""
+        # Marlin's generic silu_and_mul consumes the native [gate; up] order.
+        return not self.use_marlin and not self.use_flashinfer_trtllm
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -324,10 +325,9 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
           b_scales:   marlin_permute_scales applied (E, K//16, 2*N) float8_e4m3fn
           global_scale: (E,) bfloat16
         """
-        from sglang.jit_kernel.gptq_marlin_repack import gptq_marlin_repack
+        from sglang.kernels.ops.quantization.gptq_marlin_repack import gptq_marlin_repack
         from sglang.srt.layers.quantization.marlin_utils import (
             marlin_moe_permute_scales,
-            nvfp4_marlin_interleave_scales,
             nvfp4_marlin_process_global_scale,
             nvfp4_marlin_process_scales,
         )
@@ -369,10 +369,7 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         w13_scale_t = layer.w13_weight_scale.to(layer.params_dtype).permute(0, 2, 1).contiguous()
         w13_scale_permuted = marlin_moe_permute_scales(w13_scale_t, K, 2 * N, self.group_size)
         w13_scale_list = [
-            nvfp4_marlin_interleave_scales(
-                nvfp4_marlin_process_scales(w13_scale_permuted[e]),
-                K, 2 * N, self.group_size,
-            )
+            nvfp4_marlin_process_scales(w13_scale_permuted[e])
             for e in range(E)
         ]
         layer.w13_scale_marlin = torch.nn.Parameter(
@@ -384,10 +381,7 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
         w2_scale_t = layer.w2_weight_scale.to(layer.params_dtype).permute(0, 2, 1).contiguous()
         w2_scale_permuted = marlin_moe_permute_scales(w2_scale_t, N, K, self.group_size)
         w2_scale_list = [
-            nvfp4_marlin_interleave_scales(
-                nvfp4_marlin_process_scales(w2_scale_permuted[e]),
-                N, K, self.group_size,
-            )
+            nvfp4_marlin_process_scales(w2_scale_permuted[e])
             for e in range(E)
         ]
         layer.w2_scale_marlin = torch.nn.Parameter(
@@ -430,7 +424,7 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
           GEMM2: intermediate (M*topk,N) × w2 (E,K,N) → output (M*topk, K)
           Reduce: (M*topk,K) → (M,K)
         """
-        from sglang.jit_kernel.moe_wna16_marlin import moe_wna16_marlin_gemm
+        from sglang.kernels.ops.moe.moe_wna16_marlin import moe_wna16_marlin_gemm
         from sglang.srt.layers.moe.fused_moe_triton import moe_align_block_size
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
         from sgl_kernel import moe_sum_reduce, silu_and_mul
