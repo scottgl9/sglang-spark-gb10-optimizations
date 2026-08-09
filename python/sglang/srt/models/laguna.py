@@ -52,7 +52,10 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.lora.utils import get_default_hidden_dim
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
-from sglang.srt.model_loader.weight_utils import default_weight_loader
+from sglang.srt.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from sglang.srt.models.utils import apply_qk_norm
 from sglang.srt.runtime_context import get_exec, get_forward, get_parallel
 from sglang.srt.utils import LazyValue, add_prefix, make_layers
@@ -764,6 +767,12 @@ class LagunaForCausalLM(nn.Module):
                 continue
 
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
+                continue
+
+            # RadixAttention owns KV scales beneath `.attn`, while the Laguna
+            # checkpoint stores them directly beneath `.self_attn`.
+            name = maybe_remap_kv_scale_name(name, params_dict)
+            if name is None:
                 continue
 
             # HF stores the router correction bias under the experts namespace;

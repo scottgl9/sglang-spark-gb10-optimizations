@@ -1229,14 +1229,33 @@ class DFlashWorkerV2(BaseSpecWorker):
             (num_tokens,), dtype=torch.long, device=hidden_states.device
         )
 
+        # Quantized lm_head weights (e.g. FP8 via SGLANG_QUANTIZE_LM_HEAD_FP8) are
+        # stored transposed ([hidden, vocab]) and read by their quant_method's own
+        # apply() -- a raw matmul against `weight` assumes the plain [vocab, hidden]
+        # nn.Linear layout and is both wrong-shaped and skips the method's own
+        # activation quantization. Route those through quant_method.apply() instead.
+        is_quantized = not torch.is_floating_point(weight) or weight_dtype == fp8_dtype
+
         def _cast_hs(x: torch.Tensor) -> torch.Tensor:
             return x if x.dtype == weight_dtype else x.to(weight_dtype)
+
+        def _logits(
+            hs_raw: torch.Tensor, start_col: int, end_col: Optional[int] = None
+        ) -> torch.Tensor:
+            # end_col=None means "full width" -- for a quantized (transposed)
+            # weight, weight.shape[0] is the hidden dim, not vocab, so it must
+            # not be used as a stand-in bound; slice the *output* instead.
+            if is_quantized:
+                full = lm_head.quant_method.apply(lm_head, hs_raw)
+                return full[:, start_col:end_col]
+            w = weight[start_col:end_col] if end_col is not None else weight[start_col:]
+            return torch.matmul(_cast_hs(hs_raw), w.T)
 
         if not hasattr(lm_head, "shard_indices"):
             for start in range(0, num_tokens, int(chunk_size)):
                 end = min(num_tokens, start + int(chunk_size))
-                hs = _cast_hs(hidden_states[start:end])
-                logits = torch.matmul(hs, weight.T)
+                hs_raw = hidden_states[start:end]
+                logits = _logits(hs_raw, 0)
                 out_tokens[start:end] = torch.argmax(logits, dim=-1).to(torch.long)
             return out_tokens
 
@@ -1289,11 +1308,11 @@ class DFlashWorkerV2(BaseSpecWorker):
             fast_chunk_size = max(int(chunk_size), 1024)
             for start in range(0, num_tokens, fast_chunk_size):
                 end = min(num_tokens, start + fast_chunk_size)
-                hs = _cast_hs(hidden_states[start:end])
+                hs_raw = hidden_states[start:end]
                 if num_org > 0:
-                    base_logits = torch.matmul(hs, weight[:num_org].T)
+                    base_logits = _logits(hs_raw, 0, num_org)
                     local_max, local_arg = _ensure_local_reduce_buffers(
-                        end - start, base_logits.dtype, hs.device
+                        end - start, base_logits.dtype, hs_raw.device
                     )
                     torch.max(base_logits, dim=-1, out=(local_max, local_arg))
                     out_tokens[start:end].copy_(local_arg)
@@ -1304,14 +1323,14 @@ class DFlashWorkerV2(BaseSpecWorker):
 
         for start in range(0, num_tokens, int(chunk_size)):
             end = min(num_tokens, start + int(chunk_size))
-            hs = _cast_hs(hidden_states[start:end])
-            chunk_len = int(hs.shape[0])
+            hs_raw = hidden_states[start:end]
+            chunk_len = int(hs_raw.shape[0])
 
             # Base vocab logits.
             if num_org > 0:
-                base_logits = torch.matmul(hs, weight[:num_org].T)
+                base_logits = _logits(hs_raw, 0, num_org)
                 local_max, local_arg = _ensure_local_reduce_buffers(
-                    chunk_len, base_logits.dtype, hs.device
+                    chunk_len, base_logits.dtype, hs_raw.device
                 )
                 torch.max(base_logits, dim=-1, out=(local_max, local_arg))
             else:
@@ -1319,19 +1338,17 @@ class DFlashWorkerV2(BaseSpecWorker):
                     (chunk_len,),
                     torch.finfo(weight_dtype).min,
                     dtype=weight_dtype,
-                    device=hs.device,
+                    device=hs_raw.device,
                 )
                 local_arg = torch.zeros(
-                    (chunk_len,), dtype=torch.int64, device=hs.device
+                    (chunk_len,), dtype=torch.int64, device=hs_raw.device
                 )
 
             # Added vocab logits (e.g., LoRA-added embeddings), if present.
             if num_added > 0:
                 added_slice_start = num_org_padded
                 added_slice_end = num_org_padded + num_added
-                added_logits = torch.matmul(
-                    hs, weight[added_slice_start:added_slice_end].T
-                )
+                added_logits = _logits(hs_raw, added_slice_start, added_slice_end)
                 added_max, added_arg = torch.max(added_logits, dim=-1)
                 use_added = added_max > local_max
                 local_max = torch.where(use_added, added_max, local_max)
@@ -1347,7 +1364,7 @@ class DFlashWorkerV2(BaseSpecWorker):
                 global_ids = local_arg
             else:
                 global_ids = torch.empty(
-                    (chunk_len,), dtype=torch.int64, device=hs.device
+                    (chunk_len,), dtype=torch.int64, device=hs_raw.device
                 )
                 is_base = local_arg < num_org
                 global_ids[is_base] = org_vocab_start + local_arg[is_base]
@@ -1367,15 +1384,15 @@ class DFlashWorkerV2(BaseSpecWorker):
                 or self._draft_greedy_gathered_max_buf is None
                 or self._draft_greedy_gathered_ids_buf is None
                 or self._draft_greedy_gathered_max_buf.dtype != local_max.dtype
-                or self._draft_greedy_gathered_max_buf.device != hs.device
+                or self._draft_greedy_gathered_max_buf.device != hs_raw.device
             ):
                 # Allocate enough space for the max chunk size to avoid reallocations.
                 cap = tp_size * chunk_cap
                 self._draft_greedy_gathered_max_buf = torch.empty(
-                    (cap,), dtype=local_max.dtype, device=hs.device
+                    (cap,), dtype=local_max.dtype, device=hs_raw.device
                 )
                 self._draft_greedy_gathered_ids_buf = torch.empty(
-                    (cap,), dtype=global_ids.dtype, device=hs.device
+                    (cap,), dtype=global_ids.dtype, device=hs_raw.device
                 )
                 self._draft_greedy_gather_cap = cap
 
@@ -1384,17 +1401,17 @@ class DFlashWorkerV2(BaseSpecWorker):
                 or self._draft_greedy_best_rank_buf is None
                 or self._draft_greedy_rank_index_buf is None
                 or self._draft_greedy_selected_ids_buf is None
-                or self._draft_greedy_best_rank_buf.device != hs.device
-                or self._draft_greedy_selected_ids_buf.device != hs.device
+                or self._draft_greedy_best_rank_buf.device != hs_raw.device
+                or self._draft_greedy_selected_ids_buf.device != hs_raw.device
             ):
                 self._draft_greedy_best_rank_buf = torch.empty(
-                    (chunk_cap,), dtype=torch.int64, device=hs.device
+                    (chunk_cap,), dtype=torch.int64, device=hs_raw.device
                 )
                 self._draft_greedy_rank_index_buf = torch.empty(
-                    (1, chunk_cap), dtype=torch.int64, device=hs.device
+                    (1, chunk_cap), dtype=torch.int64, device=hs_raw.device
                 )
                 self._draft_greedy_selected_ids_buf = torch.empty(
-                    (1, chunk_cap), dtype=torch.int64, device=hs.device
+                    (1, chunk_cap), dtype=torch.int64, device=hs_raw.device
                 )
                 self._draft_greedy_index_cap = chunk_cap
 
