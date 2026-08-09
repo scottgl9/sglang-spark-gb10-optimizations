@@ -275,6 +275,20 @@ cmd_build() {
         # triton 3.6.0 ships ptxas-blackwell (CUDA 12.9) that handles SM 100+/121a correctly.
         info "Upgrading triton to 3.6.0 (SM121a ptxas support)..."
         pip install triton==3.6.0
+
+        # `pip install -e "python[all]"` above pulls in pyproject.toml's declared
+        # torch==2.11.0 (upstream PR #21247), silently undoing Step 2's pin.
+        # torch >=2.10 changed c10_cuda_check_implementation's signature
+        # (int -> unsigned int), breaking the ABI of Step 4's prebuilt sgl-kernel
+        # cu130 wheel ("undefined symbol:
+        # _ZN3c104cuda29c10_cuda_check_implementationEiPKcS2_ib" at import).
+        # Re-pin back to the validated 2.9.1+cu130 stack before Step 4 runs.
+        info "Re-pinning torch to 2.9.1+cu130 (editable install upgraded it)..."
+        pip install \
+            torch==2.9.1+cu130 \
+            torchvision==0.24.1 \
+            torchaudio==2.9.1 \
+            --index-url https://download.pytorch.org/whl/cu130
     else
         info "Skipping sglang install (--skip-sglang)"
     fi
