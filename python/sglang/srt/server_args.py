@@ -659,6 +659,7 @@ class ServerArgs:
     export_baked_checkpoint: A[
         Optional[str],
         "Export the fully loaded post-quantized model as a Hugging Face safetensors checkpoint to this directory and exit.",
+        NS("model"),
     ] = None
     quantize_and_serve: A[
         bool,
