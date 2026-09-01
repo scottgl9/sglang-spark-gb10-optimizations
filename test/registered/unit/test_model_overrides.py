@@ -2946,8 +2946,49 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                     "moe_runner_backend": "flashinfer_trtllm",
                 },
             )
-        with override_platform(is_sm100=False):
+        with override_platform(is_sm100=False, is_sm120=False):
             self.assertEqual(_qwen3_moe_family_overrides(None, None), {})
+
+        # SM120/SM121 (GB10): compressed-tensors NVFP4 MoE routes to Marlin,
+        # since CUTLASS/TRT-LLM FP4 MoE is broken on that hardware.
+        with override_platform(is_sm100=False, is_sm120=True):
+            self.assertEqual(
+                _qwen3_moe_family_overrides(
+                    SimpleNamespace(
+                        quantization="compressed-tensors",
+                        moe_a2a_backend="none",
+                        moe_runner_backend="auto",
+                    ),
+                    _hf(
+                        architectures=["Qwen3MoeForCausalLM"],
+                        quantization_config={
+                            "config_groups": {
+                                "group_0": {"weights": {"num_bits": 4}}
+                            }
+                        },
+                    ),
+                ),
+                {"moe_runner_backend": "marlin"},
+            )
+            # Non-NVFP4 (e.g. int8) compressed-tensors MoE is untouched.
+            self.assertEqual(
+                _qwen3_moe_family_overrides(
+                    SimpleNamespace(
+                        quantization="compressed-tensors",
+                        moe_a2a_backend="none",
+                        moe_runner_backend="auto",
+                    ),
+                    _hf(
+                        architectures=["Qwen3MoeForCausalLM"],
+                        quantization_config={
+                            "config_groups": {
+                                "group_0": {"weights": {"num_bits": 8}}
+                            }
+                        },
+                    ),
+                ),
+                {},
+            )
 
     def test_step3p_declarations_at_callable_level(self):
         from sglang.srt.arg_groups.overrides import _step3p_overrides

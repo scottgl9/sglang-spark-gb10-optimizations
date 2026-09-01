@@ -62,7 +62,11 @@ class TestLagunaWeightLoading(unittest.TestCase):
                 "format": "nvfp4-pack-quantized",
                 "config_groups": {},
                 "ignore": [],
-                "kv_cache_scheme": {"type": "float", "num_bits": 8},
+                "kv_cache_scheme": {
+                    "type": "float",
+                    "num_bits": 8,
+                    "strategy": "tensor",
+                },
             }
         )
         attn = RadixAttention(
