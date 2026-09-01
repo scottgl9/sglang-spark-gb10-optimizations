@@ -108,18 +108,20 @@ setup_runtime_env() {
     export FLASHINFER_WORKSPACE_DIR="${SGLANG_COMPILERS_DIR}/flashinfer"
     export TORCHINDUCTOR_CACHE_DIR="${SGLANG_COMPILERS_DIR}/torch/inductor"
 
-    # flashinfer-python/flashinfer-cubin version drift (e.g. 0.6.14 vs 0.6.12) is
-    # harmless on GB10 -- gdn/kda_flashinfer.py already os.environ.setdefault()
-    # this, but too late for code paths that `import flashinfer` at module load
-    # (e.g. compressed_tensors_w4a4_mxint4_moe.py -> flashinfer.fp4_quantization),
-    # which raises RuntimeError in flashinfer/jit/env.py before that code runs.
-    # Set it here so it's in the environment before the interpreter even starts.
+    # flashinfer-python/flashinfer-cubin version drift (pyproject.toml pins
+    # flashinfer-python well ahead of the newest flashinfer-cubin release; no
+    # matching cubin build exists for GB10 yet) is harmless -- gdn/kda_flashinfer.py
+    # already os.environ.setdefault() this, but too late for code paths that
+    # `import flashinfer` at module load (e.g. compressed_tensors_w4a4_mxint4_moe.py
+    # -> flashinfer.fp4_quantization), which raises RuntimeError in
+    # flashinfer/jit/env.py before that code runs. Set it here so it's in the
+    # environment before the interpreter even starts.
     export FLASHINFER_DISABLE_VERSION_CHECK="${FLASHINFER_DISABLE_VERSION_CHECK:-1}"
 
-    # This venv's flashinfer-python is intentionally pinned at 0.6.14 (see
-    # build_env.sh) -- no matching flashinfer-cubin release exists yet for the
-    # 0.6.15.post1 floor sglang's own engine.py now asserts at startup, and a
-    # prior attempt to upgrade both together broke sgl-kernel's torch-2.9 ABI.
+    # sgl-kernel is a prebuilt cu130 wheel compiled against torch 2.9's ABI (see
+    # build_env.sh / .sglang venv torch pin); it trails the flashinfer-python /
+    # sgl-kernel version floor sglang's own engine.py asserts at startup, and a
+    # prior attempt to upgrade the whole stack together broke that ABI compat.
     # Skip the hard version-floor assertion for flashinfer-python/sglang-kernel.
     export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK="${SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK:-1}"
 
@@ -267,7 +269,10 @@ cmd_build() {
     if [[ $SKIP_SGLANG -eq 0 ]]; then
         info "Installing sglang[all] in editable mode..."
         pushd "${SGLANG_DIR}" > /dev/null
-        pip install -e "python[all]" 2>&1 | tee "${LOG}"
+        # Upstream added a Rust radix-tree extension (rust/sglang-radix-tree);
+        # its setup.py build hook shells out to `cargo` to discover the crate,
+        # which this host doesn't have. SGLANG_BUILD_RUST_EXTS=none skips it.
+        SGLANG_BUILD_RUST_EXTS=none pip install -e "python[all]" 2>&1 | tee "${LOG}"
         popd > /dev/null
 
         # Upgrade triton to 3.6.0: sglang[all] installs 3.5.1 which lacks ptxas-blackwell,
